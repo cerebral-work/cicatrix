@@ -2,7 +2,7 @@
 name = "cicatrix"
 version = "0.0.0"
 edition = "2021"
-description = "Regression-memory + convention-drift framework — remember every fixed bug; never reopen the wound."
+description = "Regression-memory + convention-drift framework. Approach drawn from wbrown/janus-datalog; bridged into reverie."
 license = "MIT"
 
 [[bin]]

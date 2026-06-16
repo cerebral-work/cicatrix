@@ -1,12 +1,14 @@
 # cicatrix
 
-> Scar tissue for codebases. Remember every fixed bug; never reopen the wound.
+> Persistent, queryable memory of fixed bugs + convention-drift detection, with commit-time review gates.
 
-An independent **regression-memory + convention-drift** framework, adapted from Wes Brown's
-"don't make old bugs" method (materialized in [`wbrown/janus-datalog`](https://github.com/wbrown/janus-datalog))
-and bridged into [reverie](https://github.com/cerebral-work/reverie)'s consolidation substrate.
+An independent **regression-memory + convention-drift** framework. Its approach is drawn from
+**Wes Brown's [`wbrown/janus-datalog`](https://github.com/wbrown/janus-datalog)** — specifically that
+project's agent-discipline layer: a corpus of structured bug-fix docs distilled into meta-patterns,
+plus fail-closed LLM review hooks — bridged into [reverie](https://github.com/cerebral-work/reverie)'s
+consolidation substrate.
 
-The premise: an agent (human or LLM) reintroduces old bugs because the *memory of past failures*
+The premise: an agent (human or LLM) reintroduces a fixed bug because the *memory of past failures*
 isn't queryable at authoring time. cicatrix makes it queryable, and gates commits on it.
 
 ## Three arms

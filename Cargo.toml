@@ -1,0 +1,10 @@
+[package]
+name = "cicatrix"
+version = "0.0.0"
+edition = "2021"
+description = "Regression-memory + convention-drift framework — remember every fixed bug; never reopen the wound."
+license = "MIT"
+
+[[bin]]
+name = "cicatrix"
+path = "src/main.rs"

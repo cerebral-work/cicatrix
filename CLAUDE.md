@@ -5,7 +5,9 @@ checkpoint. Read before editing. Adapted from `wbrown/janus-datalog`'s method.
 
 ## Invariants
 
-- **The baseline is green.** The suite passes at session start by construction (`.cicatrix/baseline-green`).
+- **The baseline is green.** The suite passes at session start by construction:
+  `.cicatrix/establish-baseline.sh` runs `cargo test` and writes `.cicatrix/baseline-green`
+  *only* on green (removing it on red). Run it at session start.
   Therefore any red test during this session **was caused by your work**. "Pre-existing failure"
   is forbidden phrasing — investigate, don't excuse.
 - **Every bug fix ships a regression test.** No fix lands without an executable guard, and a

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.cicatrix/establish-baseline.sh",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

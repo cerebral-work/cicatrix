@@ -34,3 +34,25 @@ pub fn meta_patterns() -> &'static str {
      - Correctness before performance — a fast wrong answer is a bug.\n\
      - Test structure, not just outcomes — assert the invariant, not only the happy path.\n"
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The injected block must carry every named meta-pattern class. If a rule is silently
+    /// dropped when this string is edited, an agent gets injected with an incomplete corpus —
+    /// the failure is invisible at the seam (the "type mismatches kill" class, applied to us).
+    #[test]
+    fn meta_patterns_carry_every_named_class() {
+        let block = meta_patterns();
+        for class in [
+            "Type mismatches kill",
+            "Two implementations of one fact drift",
+            "Edge cases are real cases",
+            "Correctness before performance",
+            "Test structure, not just outcomes",
+        ] {
+            assert!(block.contains(class), "meta_patterns() dropped class: {class}");
+        }
+    }
+}

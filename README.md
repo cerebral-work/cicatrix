@@ -49,7 +49,9 @@ drift/                         convention-drift scans (repo × marker)
 CLAUDE.md                      injected meta-patterns + project contract
 .claude/hooks/commit-gate.sh   the audit gate
 src/                           Rust crate: CLI (record/query/drift/inject) + store trait
-.cicatrix/baseline-green       marker asserting the suite was green at session start
+tests/cli.rs                   CLI behavior suite (every verb + the drift-path invariant)
+.cicatrix/establish-baseline.sh  runs the suite; writes baseline-green only on green
+.cicatrix/baseline-green       session-local marker (gitignored) the commit-gate requires
 ```
 
 Not yet a git remote — local only pending sign-off.

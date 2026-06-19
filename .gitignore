@@ -2,3 +2,6 @@
 .cicatrix/baseline-green
 *.db
 janus-datalog/
+
+# foreign reference source (provenance, not ours to commit)
+refs/

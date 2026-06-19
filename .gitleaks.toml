@@ -1,0 +1,28 @@
+# gitleaks config for cicatrix.
+#
+# Extends the default gitleaks ruleset. Allowlists cover generated artifacts and
+# in-tree fixtures that trip false positives — real credentials MUST NOT be added here.
+# Reference: https://github.com/gitleaks/gitleaks#configuration
+
+title = "cicatrix gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Build output and in-tree test fixtures hold no real secrets"
+paths = [
+    '''target/.*''',
+    '''.*/tests/.*''',
+]
+
+[[allowlists]]
+description = "Synthetic tokens / IDs used in docs, bug-docs, and examples"
+regexes = [
+    '''[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}''',
+    '''(fake|example|test|dummy|placeholder|sample)[A-Za-z0-9_-]*''',
+]
+
+[[allowlists]]
+description = "Known-safe stopwords that trip the generic secret regex"
+stopwords = ["example", "placeholder", "fake", "dummy", "test", "sample"]

@@ -23,13 +23,15 @@ isn't queryable at authoring time. cicatrix makes it queryable, and gates commit
    enforce a green baseline, require a regression test per fix. Plus a **convention-drift scanner**
    (`drift/`) — the static-analysis arm: repo × convention-marker table vs canonical templates.
 
-## Substrate (decided 2026-06-16: "datalog store + reverie bridge")
+## Substrate (decided 2026-06-18: "reverie is the store")
 
-- **Fact store:** `wbrown/janus-datalog` (Datomic-style EAV + immutable history + time-travel
-  `AsOf(commit)`), run as a **sidecar** binary that this Rust crate drives. Lets you query the
-  bug graph *as of any past commit*.
-- **Bridge:** facts mirror into reverie (dream consolidation already has a `coord/bugs` family);
-  cicatrix is "consolidation applied to defects."
+- **Fact store:** **reverie** is the single store (the janus-datalog sidecar was dropped for v1).
+  The markdown corpus (`docs/bugs/resolved/`) is the source of truth; each bug-fact is projected
+  one-way into a reverie observation (`project=cicatrix`) — a regenerable query index.
+- **Time-travel:** `query --as-of <commit>` preserves janus's `AsOf(commit)` without a second
+  store, by filtering on the fix-commit's git-ancestry.
+- **Why reverie:** it's the holistic memory surface (CER-1369); cicatrix is "consolidation applied
+  to defects." Full design: `docs/design/cicatrix-reverie-unsigned-paas-integration.md`.
 
 ## Status — v0 thin slice (stands up the loop, shallow)
 
@@ -39,7 +41,8 @@ isn't queryable at authoring time. cicatrix makes it queryable, and gates commit
 | Meta-pattern injection | ✅ `CLAUDE.md` (rolled-up rules) |
 | Convention-drift table | ✅ real data from the 2026-06-16 ~/projects topology survey (`drift/`) |
 | Commit-gate hook | ✅ minimal `commit-gate.sh` (green-baseline + premature-victory block) |
-| janus-datalog store + reverie bridge | ⬜ **next** — `src/store.rs` defines the trait + sidecar contract; v0 uses a local fallback |
+| reverie bridge (`record`/`query`) | ✅ Phase 0+1 — `ReverieBridge` projects facts → `POST /observations` and queries `/search`; `--as-of` git-ancestry filter (CER-1374/1375, against local reveried) |
+| cloud-served + revenant consumption | ⬜ **next** — Phase 2/3, gated on the reverie cloud deploy (CER-1362 → OPS-271) and revenant (TOD-978) |
 
 ## Layout
 
@@ -49,7 +52,9 @@ drift/                         convention-drift scans (repo × marker)
 CLAUDE.md                      injected meta-patterns + project contract
 .claude/hooks/commit-gate.sh   the audit gate
 src/                           Rust crate: CLI (record/query/drift/inject) + store trait
-.cicatrix/baseline-green       marker asserting the suite was green at session start
+tests/cli.rs                   CLI behavior suite (every verb + the drift-path invariant)
+.cicatrix/establish-baseline.sh  runs the suite; writes baseline-green only on green
+.cicatrix/baseline-green       session-local marker (gitignored) the commit-gate requires
 ```
 
 Not yet a git remote — local only pending sign-off.

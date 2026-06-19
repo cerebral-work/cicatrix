@@ -5,7 +5,9 @@ checkpoint. Read before editing. Adapted from `wbrown/janus-datalog`'s method.
 
 ## Invariants
 
-- **The baseline is green.** The suite passes at session start by construction (`.cicatrix/baseline-green`).
+- **The baseline is green.** The suite passes at session start by construction:
+  `.cicatrix/establish-baseline.sh` runs `cargo test` and writes `.cicatrix/baseline-green`
+  *only* on green (removing it on red). Run it at session start.
   Therefore any red test during this session **was caused by your work**. "Pre-existing failure"
   is forbidden phrasing — investigate, don't excuse.
 - **Every bug fix ships a regression test.** No fix lands without an executable guard, and a
@@ -52,5 +54,6 @@ reasoning · **simplifying away the bug** (repro that drops the triggering condi
 ## How cicatrix uses this file
 
 `cicatrix inject` emits the Meta-patterns section into an agent's context before a task.
-`cicatrix record` appends a new `BUG_*.md` and (next) a fact to the janus-datalog store, then
-re-rolls this section. The commit-gate hook reads it to judge "premature victory."
+`cicatrix record` reads a `BUG_*.md` and projects it as a reverie observation (project=`cicatrix`);
+`cicatrix query <changed-files>` asks reverie whether the diff touches a known-bug surface. The
+commit-gate hook reads this section to judge "premature victory."

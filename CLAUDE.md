@@ -54,5 +54,6 @@ reasoning · **simplifying away the bug** (repro that drops the triggering condi
 ## How cicatrix uses this file
 
 `cicatrix inject` emits the Meta-patterns section into an agent's context before a task.
-`cicatrix record` appends a new `BUG_*.md` and (next) a fact to the janus-datalog store, then
-re-rolls this section. The commit-gate hook reads it to judge "premature victory."
+`cicatrix record` reads a `BUG_*.md` and projects it as a reverie observation (project=`cicatrix`);
+`cicatrix query <changed-files>` asks reverie whether the diff touches a known-bug surface. The
+commit-gate hook reads this section to judge "premature victory."

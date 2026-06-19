@@ -21,7 +21,9 @@ const DEFAULT_CORPUS: &str = "docs/bugs/resolved";
 
 /// The canonical bug-doc corpus dir (`CICATRIX_CORPUS`, default `docs/bugs/resolved`).
 pub fn corpus_dir() -> PathBuf {
-    std::env::var("CICATRIX_CORPUS").unwrap_or_else(|_| DEFAULT_CORPUS.to_string()).into()
+    std::env::var("CICATRIX_CORPUS")
+        .unwrap_or_else(|_| DEFAULT_CORPUS.to_string())
+        .into()
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -64,10 +66,19 @@ pub fn project(fact: &BugFact) -> ObservationPayload {
     let mut tags: Vec<Tag> = fact
         .files
         .iter()
-        .map(|f| Tag { facet: "file".into(), value: f.clone() })
+        .map(|f| Tag {
+            facet: "file".into(),
+            value: f.clone(),
+        })
         .collect();
-    tags.push(Tag { facet: "meta-pattern".into(), value: fact.meta_pattern.clone() });
-    tags.push(Tag { facet: "fix-commit".into(), value: fact.fix_commit.clone() });
+    tags.push(Tag {
+        facet: "meta-pattern".into(),
+        value: fact.meta_pattern.clone(),
+    });
+    tags.push(Tag {
+        facet: "fix-commit".into(),
+        value: fact.fix_commit.clone(),
+    });
 
     ObservationPayload {
         type_: OBS_TYPE.into(),
@@ -110,8 +121,14 @@ impl ReverieBridge {
             .unwrap_or_else(|_| DEFAULT_URL.to_string())
             .trim_end_matches('/')
             .to_string();
-        let token = std::env::var("REVERIE_TOKEN").ok().filter(|s| !s.is_empty());
-        Self { base_url, token, corpus_dir: corpus_dir() }
+        let token = std::env::var("REVERIE_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        Self {
+            base_url,
+            token,
+            corpus_dir: corpus_dir(),
+        }
     }
 
     fn auth(&self, req: ureq::Request) -> ureq::Request {
@@ -123,14 +140,16 @@ impl ReverieBridge {
 }
 
 fn to_io(e: ureq::Error) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, e.to_string())
+    io::Error::other(e.to_string())
 }
 
 impl BugStore for ReverieBridge {
     fn record(&mut self, fact: &BugFact) -> io::Result<()> {
         let payload = project(fact);
         let url = format!("{}/observations", self.base_url);
-        self.auth(ureq::post(&url)).send_json(&payload).map_err(to_io)?;
+        self.auth(ureq::post(&url))
+            .send_json(&payload)
+            .map_err(to_io)?;
         Ok(())
     }
 
@@ -159,7 +178,10 @@ impl BugStore for ReverieBridge {
         // Hydrate matched slugs to full facts from the canonical corpus.
         let facts = bug_md::parse_dir(&self.corpus_dir)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        Ok(facts.into_iter().filter(|f| slugs.contains(&f.id)).collect())
+        Ok(facts
+            .into_iter()
+            .filter(|f| slugs.contains(&f.id))
+            .collect())
     }
 }
 
@@ -191,16 +213,31 @@ mod tests {
     #[test]
     fn content_embeds_every_file_path_for_fts() {
         let c = render_content(&sample());
-        assert!(c.contains("src/a.rs:12") && c.contains("src/b.rs"), "paths missing: {c}");
+        assert!(
+            c.contains("src/a.rs:12") && c.contains("src/b.rs"),
+            "paths missing: {c}"
+        );
     }
 
     #[test]
     fn tags_cover_files_metapattern_and_fixcommit() {
         let p = project(&sample());
-        assert!(p.tags.contains(&Tag { facet: "file".into(), value: "src/a.rs:12".into() }));
-        assert!(p.tags.contains(&Tag { facet: "file".into(), value: "src/b.rs".into() }));
-        assert!(p.tags.contains(&Tag { facet: "meta-pattern".into(), value: "Type mismatches kill".into() }));
-        assert!(p.tags.contains(&Tag { facet: "fix-commit".into(), value: "#42 (CER-1)".into() }));
+        assert!(p.tags.contains(&Tag {
+            facet: "file".into(),
+            value: "src/a.rs:12".into()
+        }));
+        assert!(p.tags.contains(&Tag {
+            facet: "file".into(),
+            value: "src/b.rs".into()
+        }));
+        assert!(p.tags.contains(&Tag {
+            facet: "meta-pattern".into(),
+            value: "Type mismatches kill".into()
+        }));
+        assert!(p.tags.contains(&Tag {
+            facet: "fix-commit".into(),
+            value: "#42 (CER-1)".into()
+        }));
     }
 
     #[test]

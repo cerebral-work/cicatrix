@@ -43,7 +43,10 @@ fn cmd_record(rest: &[String]) -> ExitCode {
     let facts = if paths.is_empty() {
         bug_md::parse_dir(&reverie::corpus_dir())
     } else {
-        paths.iter().map(|p| bug_md::parse_file(Path::new(p.as_str()))).collect()
+        paths
+            .iter()
+            .map(|p| bug_md::parse_file(Path::new(p.as_str())))
+            .collect()
     };
     let facts = match facts {
         Ok(f) => f,

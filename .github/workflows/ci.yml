@@ -1,0 +1,107 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Incremental compilation is useless in CI and bloats the rust-cache.
+  CARGO_INCREMENTAL: 0
+
+# Cancel in-progress runs on the same ref — only the latest push matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-lint
+          # Only main writes the cache; PRs restore-only (no churn / eviction).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  baseline:
+    name: baseline gate (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      # Run cicatrix's OWN gate: it runs the suite and writes .cicatrix/baseline-green
+      # only on green (exit 1 on red). "Green by construction" enforced server-side,
+      # not just on the operator's laptop.
+      - name: establish-baseline (green gate)
+        run: bash .cicatrix/establish-baseline.sh
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Prebuilt binary instead of the docker-based EmbarkStudios action (which
+      # flakes on unauthenticated Docker Hub pull limits on hosted runners).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          # gitleaks-action requires GITHUB_TOKEN to scan pull_request events.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: typos
+        uses: crate-ci/typos@v1.47.2
+
+  release-build:
+    name: release build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    needs: [lint, baseline]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: build --release
+        run: cargo build --release --bin cicatrix
+      - name: upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: cicatrix
+          path: target/release/cicatrix
+          retention-days: 14

@@ -49,8 +49,14 @@ mod tests {
 
     #[test]
     fn extract_ref_finds_sha_rejects_pr_and_ticket() {
-        assert_eq!(extract_ref("6d05ae94b0c3"), Some("6d05ae94b0c3".to_string()));
-        assert_eq!(extract_ref("fix in abc1234 landed"), Some("abc1234".to_string()));
+        assert_eq!(
+            extract_ref("6d05ae94b0c3"),
+            Some("6d05ae94b0c3".to_string())
+        );
+        assert_eq!(
+            extract_ref("fix in abc1234 landed"),
+            Some("abc1234".to_string())
+        );
         assert_eq!(extract_ref("#609 (CER-914)"), None); // PR + ticket, no sha
         assert_eq!(extract_ref(""), None);
     }
@@ -59,7 +65,11 @@ mod tests {
     fn is_ancestor_is_inclusive_and_rejects_garbage() {
         // HEAD is its own ancestor (inclusive boundary).
         let head = String::from_utf8(
-            Command::new("git").args(["rev-parse", "HEAD"]).output().unwrap().stdout,
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
         )
         .unwrap();
         let head = head.trim();
@@ -71,7 +81,11 @@ mod tests {
     #[test]
     fn filter_reports_unresolvable_fixcommits_instead_of_dropping_silently() {
         let head = String::from_utf8(
-            Command::new("git").args(["rev-parse", "HEAD"]).output().unwrap().stdout,
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
         )
         .unwrap();
         let head = head.trim().to_string();
@@ -83,9 +97,16 @@ mod tests {
             regression_test: "t".into(),
             meta_pattern: "m".into(),
         };
-        let sha_fact = BugFact { id: "BUG_SHA".into(), fix_commit: head.clone(), ..pr_fact.clone() };
+        let sha_fact = BugFact {
+            id: "BUG_SHA".into(),
+            fix_commit: head.clone(),
+            ..pr_fact.clone()
+        };
         let (kept, skipped) = filter_as_of(vec![pr_fact, sha_fact], &head);
-        assert_eq!(kept.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), vec!["BUG_SHA"]);
+        assert_eq!(
+            kept.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            vec!["BUG_SHA"]
+        );
         assert_eq!(skipped, vec!["BUG_PR"]); // reported, not silently gone
     }
 }

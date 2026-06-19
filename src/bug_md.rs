@@ -76,7 +76,14 @@ pub fn parse(text: &str, slug_hint: Option<&str>) -> Result<BugFact, String> {
     let regression_test = req("regression-test")?;
     let meta_pattern = req("meta-pattern")?;
 
-    Ok(BugFact { id: slug, files, symptom, fix_commit, regression_test, meta_pattern })
+    Ok(BugFact {
+        id: slug,
+        files,
+        symptom,
+        fix_commit,
+        regression_test,
+        meta_pattern,
+    })
 }
 
 /// Parse a single `BUG_*.md` file; slug falls back to the filename stem.
@@ -159,7 +166,11 @@ mod tests {
     fn real_corpus_parses() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/bugs/resolved");
         let facts = parse_dir(&dir).expect("corpus should parse");
-        assert!(facts.len() >= 2, "expected >=2 seed bugs, got {}", facts.len());
+        assert!(
+            facts.len() >= 2,
+            "expected >=2 seed bugs, got {}",
+            facts.len()
+        );
         for f in &facts {
             assert!(f.id.starts_with("BUG_"), "slug not BUG_*: {}", f.id);
             assert!(!f.files.is_empty() && !f.symptom.is_empty() && !f.meta_pattern.is_empty());

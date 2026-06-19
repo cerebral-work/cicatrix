@@ -54,7 +54,10 @@ mod tests {
             "Correctness before performance",
             "Test structure, not just outcomes",
         ] {
-            assert!(block.contains(class), "meta_patterns() dropped class: {class}");
+            assert!(
+                block.contains(class),
+                "meta_patterns() dropped class: {class}"
+            );
         }
     }
 }

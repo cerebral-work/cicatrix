@@ -52,7 +52,10 @@ fn drift_advertises_a_path_that_exists() {
     let rel = rel.trim();
     assert!(!rel.is_empty(), "`drift` printed nothing");
     let abs = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
-    assert!(abs.exists(), "`drift` advertises {rel} but it does not exist on disk");
+    assert!(
+        abs.exists(),
+        "`drift` advertises {rel} but it does not exist on disk"
+    );
 }
 
 /// `query` with no files is a usage error — exit non-zero, print usage. No network involved.
@@ -69,16 +72,25 @@ fn query_without_files_is_a_usage_error() {
 #[test]
 fn record_fails_cleanly_when_reverie_unreachable() {
     let out = run_offline(&["record", "docs/bugs/resolved/BUG_EMBED_EMPTY_INPUT_400.md"]);
-    assert!(!out.status.success(), "record must fail when reverie is unreachable");
+    assert!(
+        !out.status.success(),
+        "record must fail when reverie is unreachable"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("failed") || stderr.contains("record:"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("failed") || stderr.contains("record:"),
+        "stderr: {stderr}"
+    );
 }
 
 /// `query` against an unreachable reverie fails cleanly too (does not print a false all-clear).
 #[test]
 fn query_fails_cleanly_when_reverie_unreachable() {
     let out = run_offline(&["query", "crates/reverie-store/src/embed.rs"]);
-    assert!(!out.status.success(), "query must fail when reverie is unreachable");
+    assert!(
+        !out.status.success(),
+        "query must fail when reverie is unreachable"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("query:"), "stderr: {stderr}");
 }
@@ -88,5 +100,8 @@ fn unknown_verb_fails_with_usage() {
     let out = run(&["definitely-not-a-verb"]);
     assert!(!out.status.success(), "unknown verb should exit non-zero");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("usage:"), "expected usage on stderr; got: {stderr}");
+    assert!(
+        stderr.contains("usage:"),
+        "expected usage on stderr; got: {stderr}"
+    );
 }

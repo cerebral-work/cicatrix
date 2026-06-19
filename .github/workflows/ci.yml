@@ -76,12 +76,19 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: gitleaks
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          # Org-owned repos require a license key (org-level secret, as in reverie CI).
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # gitleaks via the CLI binary, not gitleaks/gitleaks-action: the action demands a
+      # paid GITLEAKS_LICENSE for org-owned repos, and that org secret is not scoped to
+      # cicatrix (only an org admin can grant it). The CLI is the same scanner + same
+      # .gitleaks.toml, no license wall. To switch to the house action later: scope the
+      # org GITLEAKS_LICENSE secret to this repo, then restore the action with
+      # `env: { GITLEAKS_LICENSE, GITHUB_TOKEN }` (as in reverie CI).
+      - name: gitleaks (CLI)
+        run: |
+          set -euo pipefail
+          VER=8.18.4
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks detect --no-git --source . --config .gitleaks.toml --redact --no-banner
       - name: typos
         uses: crate-ci/typos@v1.47.2
 

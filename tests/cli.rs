@@ -16,6 +16,16 @@ fn run(args: &[&str]) -> Output {
         .expect("failed to spawn cicatrix binary")
 }
 
+/// Run with `REVERIE_URL` pointed at a dead port so the bridge fails deterministically — keeps
+/// these tests (and the green-baseline gate) free of any dependency on a live reveried.
+fn run_offline(args: &[&str]) -> Output {
+    Command::new(BIN)
+        .args(args)
+        .env("REVERIE_URL", "http://127.0.0.1:1")
+        .output()
+        .expect("failed to spawn cicatrix binary")
+}
+
 #[test]
 fn inject_emits_the_meta_pattern_corpus() {
     let out = run(&["inject"]);
@@ -45,19 +55,32 @@ fn drift_advertises_a_path_that_exists() {
     assert!(abs.exists(), "`drift` advertises {rel} but it does not exist on disk");
 }
 
-/// `record` and `query` are honest stubs in v0: they must exit 0 *and* say so on stderr,
-/// not silently pretend to have done work (premature victory is the named failure class).
+/// `query` with no files is a usage error — exit non-zero, print usage. No network involved.
 #[test]
-fn record_and_query_are_honest_stubs() {
-    for verb in ["record", "query"] {
-        let out = run(&[verb]);
-        assert!(out.status.success(), "`{verb}` (stub) should exit 0");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("not yet wired"),
-            "`{verb}` should admit it is unwired; stderr: {stderr}"
-        );
-    }
+fn query_without_files_is_a_usage_error() {
+    let out = run(&["query"]);
+    assert!(!out.status.success(), "`query` with no files should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage:"), "expected usage; got: {stderr}");
+}
+
+/// `record` against an unreachable reverie fails cleanly (non-zero + diagnostic on stderr) rather
+/// than reporting phantom success — premature victory is the named failure class.
+#[test]
+fn record_fails_cleanly_when_reverie_unreachable() {
+    let out = run_offline(&["record", "docs/bugs/resolved/BUG_EMBED_EMPTY_INPUT_400.md"]);
+    assert!(!out.status.success(), "record must fail when reverie is unreachable");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("failed") || stderr.contains("record:"), "stderr: {stderr}");
+}
+
+/// `query` against an unreachable reverie fails cleanly too (does not print a false all-clear).
+#[test]
+fn query_fails_cleanly_when_reverie_unreachable() {
+    let out = run_offline(&["query", "crates/reverie-store/src/embed.rs"]);
+    assert!(!out.status.success(), "query must fail when reverie is unreachable");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("query:"), "stderr: {stderr}");
 }
 
 #[test]

@@ -7,22 +7,32 @@
 //! them and reports the count — never a silent drop.
 
 use crate::store::BugFact;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Pull a git-resolvable ref out of a free-form fix-commit field. Returns the first token that
-/// looks like a sha (≥7 hex chars). PR-number / ticket-id values yield `None`.
+/// looks like a sha: ≥7 hex chars **with at least one `a`–`f` letter**. The letter requirement
+/// distinguishes a sha from a long all-decimal PR/issue number (`#1234567`), which is hex-valid
+/// but never a commit ref here — so those yield `None` (conservatively excluded, like a PR ref).
 pub fn extract_ref(fix_commit: &str) -> Option<String> {
     fix_commit
         .split(|c: char| !c.is_ascii_alphanumeric())
-        .find(|tok| tok.len() >= 7 && tok.chars().all(|c| c.is_ascii_hexdigit()))
+        .find(|tok| {
+            tok.len() >= 7
+                && tok.chars().all(|c| c.is_ascii_hexdigit())
+                && tok.chars().any(|c| c.is_ascii_alphabetic())
+        })
         .map(str::to_string)
 }
 
 /// True iff `ancestor` is an ancestor of (or equal to) `commit`. A commit is its own ancestor, so
-/// the boundary is inclusive. Unresolvable refs make git exit non-zero → `false`.
+/// the boundary is inclusive. Unresolvable refs make git exit non-zero → `false`. stderr is
+/// silenced so an unresolvable ref doesn't leak git's `fatal:` into the caller's terminal during
+/// `query --as-of` — the exclusion is reported by `filter_as_of`, not by git's noise.
 pub fn is_ancestor(ancestor: &str, commit: &str) -> bool {
     Command::new("git")
         .args(["merge-base", "--is-ancestor", ancestor, commit])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -59,6 +69,12 @@ mod tests {
         );
         assert_eq!(extract_ref("#609 (CER-914)"), None); // PR + ticket, no sha
         assert_eq!(extract_ref(""), None);
+        // A long all-decimal PR/issue number is hex-valid but must NOT be read as a sha — it has
+        // no a–f letter, so it's conservatively excluded (regression guard for the false-positive).
+        assert_eq!(extract_ref("#1234567"), None);
+        assert_eq!(extract_ref("see PR 9876543 for the fix"), None);
+        // …but a real sha that happens to start with digits still resolves (has hex letters).
+        assert_eq!(extract_ref("123abc7"), Some("123abc7".to_string()));
     }
 
     #[test]

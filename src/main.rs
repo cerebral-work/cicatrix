@@ -1,5 +1,4 @@
 //! cicatrix — regression-memory + convention-drift CLI.
-#![allow(dead_code)]
 mod bug_md;
 mod gitf;
 mod reverie;

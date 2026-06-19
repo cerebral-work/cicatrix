@@ -76,11 +76,16 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - name: gitleaks
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          # gitleaks-action requires GITHUB_TOKEN to scan pull_request events.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Run the gitleaks CLI directly rather than gitleaks/gitleaks-action: the action
+      # demands a paid GITLEAKS_LICENSE for org-owned repos. The CLI is the same scanner
+      # and reads the same .gitleaks.toml — no license wall, no org-secret dependency.
+      - name: gitleaks (CLI)
+        run: |
+          set -euo pipefail
+          VER=8.18.4
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VER}/gitleaks_${VER}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks detect --no-git --source . --config .gitleaks.toml --redact --no-banner
       - name: typos
         uses: crate-ci/typos@v1.47.2
 

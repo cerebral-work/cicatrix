@@ -9,6 +9,7 @@
 //!   param, so file-path matching rides FTS over `content` (which embeds the paths).
 
 use crate::bug_md;
+use crate::corpus;
 use crate::store::{BugFact, BugStore};
 use serde::Serialize;
 use std::io;
@@ -17,13 +18,12 @@ use std::path::PathBuf;
 pub const PROJECT: &str = "cicatrix";
 pub const OBS_TYPE: &str = "bug-fact";
 const DEFAULT_URL: &str = "http://127.0.0.1:7437";
-const DEFAULT_CORPUS: &str = "docs/bugs/resolved";
 
-/// The canonical bug-doc corpus dir (`CICATRIX_CORPUS`, default `docs/bugs/resolved`).
+/// The canonical (grounded) bug-doc corpus dir. Back-compat shim over
+/// [`corpus::resolve_dir`] for the grounded tier (env precedence: `CICATRIX_CORPUS_GROUNDED`
+/// → `CICATRIX_CORPUS_RESOLVED` → `CICATRIX_CORPUS` → `docs/bugs/grounded`).
 pub fn corpus_dir() -> PathBuf {
-    std::env::var("CICATRIX_CORPUS")
-        .unwrap_or_else(|_| DEFAULT_CORPUS.to_string())
-        .into()
+    corpus::resolve_dir(corpus::Tier::Grounded)
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -115,7 +115,7 @@ pub struct ReverieBridge {
 
 impl ReverieBridge {
     /// `REVERIE_URL` (default `http://127.0.0.1:7437`), bearer from `REVERIE_TOKEN` if set,
-    /// corpus from `CICATRIX_CORPUS` (default `docs/bugs/resolved`).
+    /// corpus from the grounded tier (default `docs/bugs/grounded`).
     pub fn from_env() -> Self {
         let base_url = std::env::var("REVERIE_URL")
             .unwrap_or_else(|_| DEFAULT_URL.to_string())
@@ -197,6 +197,8 @@ mod tests {
             fix_commit: "#42 (CER-1)".into(),
             regression_test: "sample guard".into(),
             meta_pattern: "Type mismatches kill".into(),
+            scope: None,
+            do_not_generalize: false,
         }
     }
 

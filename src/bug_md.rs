@@ -1,8 +1,8 @@
-//! Parse `docs/bugs/resolved/BUG_*.md` into [`BugFact`]s (CER-1374, Phase 0).
+//! Parse `docs/bugs/grounded/BUG_*.md` into [`BugFact`]s (CER-1374, Phase 0).
 //!
 //! The markdown corpus is the **source of truth**; this parser is the front half of the one-way
 //! projection into reverie (see `docs/design/cicatrix-reverie-unsigned-paas-integration.md` §2).
-//! Pure + offline: no network, no reverie. Format is fixed by `docs/bugs/resolved/_SCHEMA.md`:
+//! Pure + offline: no network, no reverie. Format is fixed by `docs/bugs/grounded/_SCHEMA.md`:
 //! an `# BUG_<SLUG>` H1, a `- **key:** value` metadata list, then `## Section` prose.
 
 use crate::store::BugFact;
@@ -76,6 +76,16 @@ pub fn parse(text: &str, slug_hint: Option<&str>) -> Result<BugFact, String> {
     let regression_test = req("regression-test")?;
     let meta_pattern = req("meta-pattern")?;
 
+    // Optional fields — absent is fine (the seed corpus has neither).
+    let scope = meta
+        .get("scope")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let do_not_generalize = meta
+        .get("do-not-generalize")
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "yes" | "1"))
+        .unwrap_or(false);
+
     Ok(BugFact {
         id: slug,
         files,
@@ -83,6 +93,8 @@ pub fn parse(text: &str, slug_hint: Option<&str>) -> Result<BugFact, String> {
         fix_commit,
         regression_test,
         meta_pattern,
+        scope,
+        do_not_generalize,
     })
 }
 
@@ -161,10 +173,32 @@ mod tests {
         assert_eq!(f.id, "BUG_FROM_FILENAME");
     }
 
+    /// Seed corpus has no `scope`/`do-not-generalize` — the optional fields default cleanly.
+    #[test]
+    fn optional_fields_default_when_absent() {
+        let f = parse(SAMPLE, None).expect("should parse");
+        assert_eq!(f.scope, None);
+        assert!(!f.do_not_generalize);
+    }
+
+    /// Optional `scope` + `do-not-generalize` markers parse when present.
+    #[test]
+    fn parses_optional_scope_and_do_not_generalize() {
+        let text = SAMPLE.replace(
+            "- **status:** resolved\n",
+            "- **status:** resolved\n\
+             - **scope:** crates/reverie-store\n\
+             - **do-not-generalize:** true\n",
+        );
+        let f = parse(&text, None).expect("should parse");
+        assert_eq!(f.scope.as_deref(), Some("crates/reverie-store"));
+        assert!(f.do_not_generalize);
+    }
+
     /// Structural guard against schema drift: every real seed bug must parse cleanly.
     #[test]
     fn real_corpus_parses() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/bugs/resolved");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/bugs/grounded");
         let facts = parse_dir(&dir).expect("corpus should parse");
         assert!(
             facts.len() >= 2,

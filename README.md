@@ -15,7 +15,7 @@ isn't queryable at authoring time. cicatrix makes it queryable, and gates commit
 
 1. **Bug-memory store** — every fixed bug is a durable structured fact
    `(bug, file, symptom, root-cause, fix-commit, regression-test, meta-pattern)`.
-   Stored as markdown (`docs/bugs/resolved/`, human-authorable) *and* projected into a queryable
+   Stored as markdown (`docs/bugs/grounded/`, human-authorable) *and* projected into a queryable
    temporal store so you can ask: *"does this diff touch a known-bug surface / failure class?"*
 2. **Meta-pattern injection** — the corpus rolls up into named recurring rules (`CLAUDE.md`),
    injected **upstream** of an edit (a discipline that generates actions, not a final-checkpoint filter).
@@ -26,7 +26,7 @@ isn't queryable at authoring time. cicatrix makes it queryable, and gates commit
 ## Substrate (decided 2026-06-18: "reverie is the store")
 
 - **Fact store:** **reverie** is the single store (the janus-datalog sidecar was dropped for v1).
-  The markdown corpus (`docs/bugs/resolved/`) is the source of truth; each bug-fact is projected
+  The markdown corpus (`docs/bugs/grounded/`) is the source of truth; each bug-fact is projected
   one-way into a reverie observation (`project=cicatrix`) — a regenerable query index.
 - **Time-travel:** `query --as-of <commit>` preserves janus's `AsOf(commit)` without a second
   store, by filtering on the fix-commit's git-ancestry.
@@ -37,7 +37,7 @@ isn't queryable at authoring time. cicatrix makes it queryable, and gates commit
 
 | Arm | v0 state |
 |---|---|
-| Bug-memory (markdown) | ✅ schema + 2 real seed bugs (`docs/bugs/resolved/`) |
+| Bug-memory (markdown) | ✅ schema + 2 real seed bugs (`docs/bugs/grounded/`) |
 | Meta-pattern injection | ✅ `CLAUDE.md` (rolled-up rules) |
 | Convention-drift table | ✅ real data from the 2026-06-16 ~/projects topology survey (`drift/`) |
 | Commit-gate hook | ✅ minimal `commit-gate.sh` (green-baseline + premature-victory block) |
@@ -47,11 +47,12 @@ isn't queryable at authoring time. cicatrix makes it queryable, and gates commit
 ## Layout
 
 ```
-docs/bugs/{resolved,active}/   structured one-file-per-bug memory  (+ _SCHEMA.md)
+docs/bugs/grounded/            grounded (resolved) one-file-per-bug memory  (+ _SCHEMA.md)
+docs/bugs/observed/            observed-but-ungrounded bugs (NOT projected until promoted)
 drift/                         convention-drift scans (repo × marker)
 CLAUDE.md                      injected meta-patterns + project contract
 .claude/hooks/commit-gate.sh   the audit gate
-src/                           Rust crate: CLI (record/query/drift/inject) + store trait
+src/                           Rust crate: CLI (record/query/drift/inject/project-meta) + store trait
 tests/cli.rs                   CLI behavior suite (every verb + the drift-path invariant)
 .cicatrix/establish-baseline.sh  runs the suite; writes baseline-green only on green
 .cicatrix/baseline-green       session-local marker (gitignored) the commit-gate requires

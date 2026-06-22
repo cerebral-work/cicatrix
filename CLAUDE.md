@@ -11,7 +11,7 @@ checkpoint. Read before editing. Adapted from `wbrown/janus-datalog`'s method.
   Therefore any red test during this session **was caused by your work**. "Pre-existing failure"
   is forbidden phrasing — investigate, don't excuse.
 - **Every bug fix ships a regression test.** No fix lands without an executable guard, and a
-  `docs/bugs/resolved/BUG_*.md` entry (see `_SCHEMA.md`).
+  `docs/bugs/grounded/BUG_*.md` entry (see `_SCHEMA.md`).
 - **One mutating action per turn.** Run a single state-changing command, then *read its result
   before acting again*. Don't chain-and-commit on an unread outcome.
 - **Banned outright:** `git stash`, `git clean`, `git add -A`, `rm -rf` of work trees, heredocs
@@ -19,7 +19,7 @@ checkpoint. Read before editing. Adapted from `wbrown/janus-datalog`'s method.
 
 ## Meta-patterns (rolled up from the bug corpus — query before authoring)
 
-> Regenerated from `docs/bugs/resolved/`. Each is a *class* of past failure to avoid upstream.
+> Regenerated from `docs/bugs/grounded/`. Each is a *class* of past failure to avoid upstream.
 
 - **Type mismatches kill.** A value crossing a boundary in the wrong shape (empty vs zero vs null)
   fails silently downstream. → Validate at the seam; choose an explicit empty representation.
@@ -32,6 +32,16 @@ checkpoint. Read before editing. Adapted from `wbrown/janus-datalog`'s method.
 - **Correctness before performance.** A fast wrong answer is a bug. → Make it right, then measure.
 - **Test structure, not just outcomes.** Many tests through one code path = false confidence.
   → Assert the shape/invariant, not only the happy-path output.
+
+The block below is machine-managed: `cicatrix project-meta` regenerates it from the grounded
+corpus (`docs/bugs/grounded/`). Run `cicatrix project-meta` to preview a diff, `--apply` to write.
+Do not hand-edit between the markers.
+
+<!-- cicatrix:meta-patterns:start -->
+cicatrix meta-patterns (see CLAUDE.md):
+- Two implementations of one fact drift (seed: BUG_BACKUP_SPLIT_BRAIN)
+- Type mismatches kill (seed: BUG_EMBED_EMPTY_INPUT_400)
+<!-- cicatrix:meta-patterns:end -->
 
 ## Reviewer failure modes (enforced by `.claude/hooks/`, opt-in)
 

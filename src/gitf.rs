@@ -112,6 +112,8 @@ mod tests {
             fix_commit: "#609 (CER-914)".into(), // unresolvable
             regression_test: "t".into(),
             meta_pattern: "m".into(),
+            scope: None,
+            do_not_generalize: false,
         };
         let sha_fact = BugFact {
             id: "BUG_SHA".into(),

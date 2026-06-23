@@ -57,4 +57,4 @@ tests/cli.rs                   CLI behavior suite (every verb + the drift-path i
 .cicatrix/baseline-green       session-local marker (gitignored) the commit-gate requires
 ```
 
-Not yet a git remote — local only pending sign-off.
+Remote: `cerebral-work/cicatrix` (private).

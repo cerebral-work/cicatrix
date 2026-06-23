@@ -1,6 +1,16 @@
+<!-- lineage
+role: readme
+conforms_to: CANON.md
+defines: cicatrix (orientation surface)
+consumes: CANON.md, CLAUDE.md, session/
+-->
+
 # cicatrix
 
 > Persistent, queryable memory of fixed bugs + convention-drift detection, with commit-time review gates.
+
+**Ground truth:** [`CANON.md`](CANON.md) (what cicatrix is) · [`CLAUDE.md`](CLAUDE.md) (how an agent
+behaves here) · [`session/`](session/) (zero-loss handoff drops, one per session).
 
 An independent **regression-memory + convention-drift** framework. Its approach is drawn from
 **Wes Brown's [`wbrown/janus-datalog`](https://github.com/wbrown/janus-datalog)** — specifically that

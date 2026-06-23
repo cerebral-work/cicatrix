@@ -16,11 +16,13 @@ All notable changes to cicatrix are recorded here. Format follows
 ### Added
 - `CANON.md` — ground-truth charter (what cicatrix is), with a terrarium-style lineage block;
   separate from `CLAUDE.md` (the agent behavior contract).
-- `session/` — zero-loss handoff drop dir (one dated drop file per session, janus-derived format);
-  `session/README.md` defines the format.
+- `SESSIONS.md` — terrarium append-only handoff journal (narrative session continuity).
+- `docs/sessions/{grounded,observed}/` + `_SCHEMA.md` — session-fact drop-dir (one file per fact,
+  two-tier observed→grounded); the session sibling of `docs/bugs/`. Mirrors `unsigned-paas`.
 - `CHANGELOG.md` — this file.
 
 ### Changed
-- `README.md` — added a lineage block and a ground-truth pointer row (CANON / CLAUDE / session).
+- `README.md` — added a lineage block and a ground-truth pointer row (CANON / CLAUDE / SESSIONS /
+  docs/sessions).
 - Adopted the `cerebral-work/terrarium` federated-node standard: lineage blocks on the root context
   set, feature-branch → PR → human-merge process (see `CANON.md`).

@@ -3,7 +3,7 @@ role: canon
 conforms_to: cerebral-work/terrarium CANON.md (federated/external-node standard); docs/runbooks/adopt-standards.md
 defines: cicatrix, Bug-Fact, Grounded-Corpus, Meta-Pattern, Convention-Drift, Reverie-Bridge, Green-Baseline, Commit-Gate, As-Of-Query
 depends_on: wbrown/janus-datalog (method ancestor — agent-discipline layer); cerebral-work/reverie (the store, CER-1369)
-consumes: ReverieBridge (src/reverie.rs), the markdown bug corpus (docs/bugs/grounded/), CLAUDE.md (the agent behavior contract)
+consumes: ReverieBridge (src/reverie.rs), the markdown bug corpus (docs/bugs/grounded/), the session-fact drop-dir (docs/sessions/), SESSIONS.md (the handoff journal), CLAUDE.md (the agent behavior contract)
 -->
 
 # cicatrix — CANON
@@ -76,15 +76,22 @@ These define cicatrix's correctness; the agent-facing phrasing lives in `CLAUDE.
 cicatrix **adopts** the terrarium standards (`cerebral-work/terrarium`,
 `docs/runbooks/adopt-standards.md`) as an external node — it stays standalone and reversible. Flow
 is **bidirectional**: a discipline cicatrix sharpens (e.g. the grounded/observed two-tier corpus,
-the `session/` drop-dir handoff format) is a candidate to push **up** to the terrarium templates so
+the `docs/sessions/` session-fact drop-dir) is a candidate to push **up** to the terrarium templates so
 the whole federation benefits. When you improve a pattern here, ask: *does this belong upstream?*
 
-## 6. Session continuity
+## 6. Session continuity (two surfaces)
 
-Zero-loss handoff lives in **`session/`** — a directory of dated drop files (one per session),
-not a monolithic journal. Format and lineage: `session/README.md`. The convention is adopted from
-`wbrown/janus-datalog`'s per-session `SESSION_SUMMARY` drops and is cicatrix's federated variant of
-terrarium's single `SESSIONS.md`.
+Zero-loss handoff is **two** surfaces, matching the federation (`unsigned-paas`):
+
+- **`SESSIONS.md`** — the terrarium append-only handoff **journal** (newest-on-top, narrative,
+  "Session NNN"). The continuity story; front-load context, one thread to done-done,
+  park-don't-drop.
+- **`docs/sessions/{grounded,observed}/`** — the cicatrix/janus **fact drop-dir**: one file per
+  fact (`FACT_<SLUG>.md`), two-tier observed→grounded, recording the *mental-model error*. The
+  session sibling of `docs/bugs/` (same pattern, broader facts). Schema: `docs/sessions/_SCHEMA.md`.
+
+Collapsing the two into one is a logged mistake — see
+`docs/sessions/grounded/FACT_SESSION_DROPDIR_VS_JOURNAL.md`.
 
 ## 7. Cross-references
 

@@ -1,0 +1,16 @@
+{
+  "root": "~/repos",
+  "repos": [
+    { "name": "reverie", "path": "~/repos/reverie", "lang": "rust" },
+    { "name": "engram-rs", "path": "~/repos/engram-rs", "lang": "rust" },
+    { "name": "pact", "path": "~/repos/pact", "lang": "rust" },
+    { "name": "reach", "path": "~/repos/reach", "lang": "rust" },
+    { "name": "revenant", "path": "~/repos/revenant", "lang": "rust" },
+    { "name": "linearctl", "path": "~/repos/linearctl", "lang": "node" },
+    { "name": "unsigned-paas", "path": "~/repos/unsigned-paas", "lang": "tf/helm" },
+    { "name": "unsigned-gg", "path": "~/repos/unsigned-gg", "lang": "web" },
+    { "name": "cortex", "path": "~/repos/cortex" },
+    { "name": "Signal-Desktop", "path": "~/repos/Signal-Desktop", "lang": "node" },
+    { "name": "cerebral-work", "path": "~/repos/cerebral-work" }
+  ]
+}

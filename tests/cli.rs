@@ -283,3 +283,216 @@ fn project_meta_diffs_then_applies() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+// === Drift scanner (P3) ===
+
+use std::fs;
+
+/// Build a temp working dir containing a fixture markers.json (with RELATIVE repo paths so output
+/// is byte-identical regardless of where the temp dir lives) plus a small repo corpus under it.
+/// Returns the temp dir; caller spawns the binary with `current_dir(&dir)`.
+fn drift_fixture(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("cicatrix_driftcli_{tag}_{}", std::process::id()));
+    fs::remove_dir_all(&dir).ok();
+    fs::create_dir_all(&dir).unwrap();
+
+    // repo "alpha": rust, CLAUDE present, a Makefile ci target, two workflows.
+    let alpha = dir.join("repos/alpha");
+    fs::create_dir_all(alpha.join(".github/workflows")).unwrap();
+    fs::write(alpha.join("Cargo.toml"), "[package]\n").unwrap();
+    fs::write(alpha.join("CLAUDE.md"), "x").unwrap();
+    fs::write(alpha.join("Makefile"), "ci:\n\tcargo test\n").unwrap();
+    fs::write(alpha.join(".github/workflows/a.yml"), "x").unwrap();
+    fs::write(alpha.join(".github/workflows/b.yaml"), "x").unwrap();
+
+    // repo "beta": node, nothing else.
+    let beta = dir.join("repos/beta");
+    fs::create_dir_all(&beta).unwrap();
+    fs::write(beta.join("package.json"), "{}").unwrap();
+
+    // markers.json with RELATIVE paths + an absent repo to exercise the skip path.
+    let markers = r#"{
+  "root": "fixture-root",
+  "repos": [
+    { "name": "alpha", "path": "repos/alpha", "lang": "rust" },
+    { "name": "beta", "path": "repos/beta" },
+    { "name": "ghost", "path": "repos/ghost" }
+  ]
+}
+"#;
+    fs::write(dir.join("markers.json"), markers).unwrap();
+    dir
+}
+
+fn run_in(dir: &std::path::Path, args: &[&str], now: &str) -> Output {
+    Command::new(BIN)
+        .args(args)
+        .current_dir(dir)
+        .env("CICATRIX_DRIFT_NOW", now)
+        .output()
+        .expect("failed to spawn cicatrix binary")
+}
+
+/// `drift scan` regenerates a dated table against a FIXTURE markers.json + temp corpus, and a
+/// second identical run is BYTE-IDENTICAL (reproduce-on-unchanged). NOT the real ~/projects config.
+#[test]
+fn drift_scan_regenerates_and_reproduces() {
+    let dir = drift_fixture("repro");
+    let now = "2026-06-16";
+
+    let out = run_in(&dir, &["drift", "scan"], now);
+    assert!(
+        out.status.success(),
+        "scan should exit 0: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let printed = printed.trim();
+    assert_eq!(
+        printed, "drift/convention-drift-2026-06-16.md",
+        "printed: {printed}"
+    );
+
+    let path = dir.join(printed);
+    assert!(path.exists(), "scan must write the dated file");
+    let first = fs::read_to_string(&path).unwrap();
+
+    // structure: header at the pinned date, both present repos as rows, the absent repo skipped.
+    assert!(
+        first.starts_with("# Convention-drift scan \u{2014} fixture-root \u{2014} 2026-06-16\n"),
+        "{first}"
+    );
+    assert!(first.contains("| alpha | rust |"), "{first}");
+    assert!(first.contains("| beta | node |"), "{first}");
+    assert!(first.contains("## Skipped repos\n\n- ghost:"), "{first}");
+    // rows are byte-wise sorted: alpha before beta.
+    assert!(first.find("| alpha |").unwrap() < first.find("| beta |").unwrap());
+    // single trailing newline.
+    assert!(first.ends_with('\n') && !first.ends_with("\n\n"));
+
+    // reproduce-on-unchanged: a second run yields byte-identical output.
+    let out2 = run_in(&dir, &["drift", "scan"], now);
+    assert!(out2.status.success());
+    let second = fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        first, second,
+        "scan must be byte-identical on unchanged corpus"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// `drift scan --repo <path>` narrows to the single configured repo whose path matches exactly,
+/// full-regenerating a single-row table (no merge of the others).
+#[test]
+fn drift_scan_repo_narrows_to_one() {
+    let dir = drift_fixture("narrow");
+    let out = run_in(
+        &dir,
+        &["drift", "scan", "--repo", "repos/alpha"],
+        "2026-06-16",
+    );
+    assert!(
+        out.status.success(),
+        "scan --repo should exit 0: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body = fs::read_to_string(dir.join("drift/convention-drift-2026-06-16.md")).unwrap();
+    assert!(body.contains("| alpha | rust |"), "{body}");
+    assert!(
+        !body.contains("| beta |"),
+        "must narrow to one repo: {body}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// Bare `drift` (after the static arm was replaced) still prints a path that exists — proven here
+/// by scanning a freshly-regenerated drift/ dir and joining the path.
+#[test]
+fn drift_bare_prints_newest_after_scan() {
+    let dir = drift_fixture("newest");
+    // generate two dated files; bare drift must print the lexically-greatest (newest).
+    run_in(&dir, &["drift", "scan"], "2026-06-15");
+    run_in(&dir, &["drift", "scan"], "2026-06-17");
+    let out = Command::new(BIN)
+        .arg("drift")
+        .current_dir(&dir)
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let printed = printed.trim();
+    assert_eq!(
+        printed, "drift/convention-drift-2026-06-17.md",
+        "newest: {printed}"
+    );
+    assert!(dir.join(printed).exists());
+    fs::remove_dir_all(&dir).ok();
+}
+
+/// The markers.json hard-error seam (Frozen Decision #7): a missing OR malformed config is a hard
+/// error at the CLI boundary — non-zero exit + a `cicatrix drift:` diagnostic on stderr. This is
+/// the seam the loader-unit-tests can't reach; it proves `drift_scan` turns the loader Err into
+/// the CLI failure (no silent success). Asserts the prefix, not OS-specific io text (portable).
+#[test]
+fn drift_scan_missing_or_malformed_markers_is_a_hard_error() {
+    // missing markers.json: fresh empty temp dir, no config written.
+    let missing =
+        std::env::temp_dir().join(format!("cicatrix_driftcli_missing_{}", std::process::id()));
+    fs::remove_dir_all(&missing).ok();
+    fs::create_dir_all(&missing).unwrap();
+    let out = run_in(&missing, &["drift", "scan"], "2026-06-16");
+    assert!(
+        !out.status.success(),
+        "missing markers.json must be a hard error"
+    );
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("cicatrix drift:"), "missing: stderr {e}");
+    fs::remove_dir_all(&missing).ok();
+
+    // malformed markers.json: present but not valid JSON.
+    let bad = std::env::temp_dir().join(format!("cicatrix_driftcli_bad_{}", std::process::id()));
+    fs::remove_dir_all(&bad).ok();
+    fs::create_dir_all(&bad).unwrap();
+    fs::write(bad.join("markers.json"), "{ not json").unwrap();
+    let out = run_in(&bad, &["drift", "scan"], "2026-06-16");
+    assert!(
+        !out.status.success(),
+        "malformed markers.json must be a hard error"
+    );
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("cicatrix drift:"), "malformed: stderr {e}");
+    fs::remove_dir_all(&bad).ok();
+}
+
+/// Usage errors: unknown subcommand, unknown flag, and `--repo` with no value each exit FAILURE
+/// with a diagnostic on stderr.
+#[test]
+fn drift_usage_errors() {
+    // unknown subcommand
+    let out = run(&["drift", "bogus"]);
+    assert!(!out.status.success(), "unknown subcommand should fail");
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        e.contains("unknown subcommand") || e.contains("usage:"),
+        "stderr: {e}"
+    );
+
+    // unknown flag (run in a fixture dir so markers.json loads; the flag error must fire first)
+    let dir = drift_fixture("usage");
+    let out = run_in(&dir, &["drift", "scan", "--nope"], "2026-06-16");
+    assert!(!out.status.success(), "unknown flag should fail");
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("unknown flag"), "stderr: {e}");
+
+    // --repo with no value
+    let out = run_in(&dir, &["drift", "scan", "--repo"], "2026-06-16");
+    assert!(!out.status.success(), "--repo without value should fail");
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        e.contains("--repo needs a <path>") || e.contains("needs a"),
+        "stderr: {e}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}

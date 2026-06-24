@@ -1,5 +1,6 @@
 /target
 .cicatrix/baseline-green
+.claude/worktrees/
 *.db
 janus-datalog/
 

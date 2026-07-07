@@ -1,6 +1,7 @@
 //! cicatrix — regression-memory + convention-drift CLI.
 mod bug_md;
 mod corpus;
+mod drift;
 mod gitf;
 mod reverie;
 mod store;
@@ -21,14 +22,13 @@ fn main() -> ExitCode {
         "query" => cmd_query(&args[1..]),
         // regenerate the CLAUDE.md meta-pattern block from grounded facts; diff (or --apply write)
         "project-meta" => cmd_project_meta(&args[1..]),
-        "drift" => {
-            println!("drift/convention-drift-2026-06-16.md");
-            ExitCode::SUCCESS
-        }
+        // print newest scan path (bare) or regenerate the convention-drift table (`drift scan`)
+        "drift" => cmd_drift(&args[1..]),
         _ => {
             eprintln!(
                 "usage: cicatrix <inject [--target <path>] | record [<BUG_*.md>...] | \
-                 query <changed-file>... [--as-of <commit>] | project-meta [--apply] | drift>"
+                 query <changed-file>... [--as-of <commit>] | project-meta [--apply] | \
+                 drift [scan [--repo <path>]]>"
             );
             ExitCode::FAILURE
         }
@@ -186,6 +186,188 @@ fn cmd_query(rest: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+const MARKERS_JSON: &str = "markers.json";
+const DRIFT_DIR: &str = "drift";
+
+/// `drift [scan [--repo <path>]]`.
+///
+/// - bare `drift`: print the NEWEST `drift/convention-drift-*.md` path (back-compat). The lexically
+///   greatest filename is newest given the `yyyy-mm-dd` naming.
+/// - `drift scan [--repo <path>]`: load `markers.json` (CWD-relative; missing/malformed → hard
+///   error), scan, render with `resolve_now()`, write `drift/convention-drift-<date>.md`, print
+///   that path. `--repo <path>` narrows to the ONE configured repo whose `path` matches exactly,
+///   full-regenerating that single-repo table (no merge/patch).
+///
+/// All resolution is CWD-relative (markers.json and the drift/ output dir), so a caller can pin a
+/// scan at any root via its working directory — this is how the reproduce-on-unchanged test works.
+fn cmd_drift(rest: &[String]) -> ExitCode {
+    match rest.first().map(String::as_str) {
+        None => drift_print_newest(),
+        Some("scan") => drift_scan(&rest[1..]),
+        Some(other) => {
+            eprintln!("cicatrix drift: unknown subcommand {other}");
+            eprintln!("usage: cicatrix drift [scan [--repo <path>]]");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Print the newest `drift/convention-drift-*.md` path. With no scan dir or no matching file,
+/// it's a clean error (the command would otherwise advertise a path that does not exist).
+fn drift_print_newest() -> ExitCode {
+    let dir = Path::new(DRIFT_DIR);
+    let mut newest: Option<String> = None;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with("convention-drift-") && name.ends_with(".md") {
+                let rel = format!("{DRIFT_DIR}/{name}");
+                // lexically greatest == newest under yyyy-mm-dd naming
+                if newest.as_deref().map(|n| rel.as_str() > n).unwrap_or(true) {
+                    newest = Some(rel);
+                }
+            }
+        }
+    }
+    match newest {
+        Some(path) => {
+            println!("{path}");
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("cicatrix drift: no scan found under {DRIFT_DIR}/");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run `drift scan`: parse flags, load + scan markers.json, render, write the dated file, print it.
+fn drift_scan(rest: &[String]) -> ExitCode {
+    let mut repo: Option<String> = None;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--repo" => match it.next() {
+                Some(p) => repo = Some(p.clone()),
+                None => {
+                    eprintln!("cicatrix drift: --repo needs a <path>");
+                    return ExitCode::FAILURE;
+                }
+            },
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix drift: unknown flag {flag}");
+                return ExitCode::FAILURE;
+            }
+            other => {
+                eprintln!("cicatrix drift: unexpected argument {other}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let mut config = match drift::Config::load(Path::new(MARKERS_JSON)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("cicatrix drift: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // --repo narrows to the single configured repo whose path matches (full-regenerate). Compare
+    // through `expand_home` on BOTH sides: markers.json stores `~/repos/x`, but a shell expands an
+    // unquoted `--repo ~/repos/x` to an absolute path before argv — comparing the raw strings would
+    // never match. Normalizing both sides lets either the `~/...` or the expanded form match.
+    if let Some(target) = &repo {
+        let want = drift::expand_home(target);
+        config.repos.retain(|r| drift::expand_home(&r.path) == want);
+        if config.repos.is_empty() {
+            eprintln!("cicatrix drift: --repo {target} matches no configured repo");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    // Single source of truth for the scan date: `scan_config` calls `resolve_now()` once and stores
+    // it in `table.generated`; BOTH the rendered header and the output filename derive from that one
+    // value. Computing the date a second time here would be cicatrix meta-pattern #2 ("two
+    // implementations of one fact drift") — the filename could disagree with the in-table header.
+    let table = drift::scan_config(&config);
+    let rendered = render_drift_table(&table);
+
+    if let Err(e) = std::fs::create_dir_all(DRIFT_DIR) {
+        eprintln!("cicatrix drift: create {DRIFT_DIR}/: {e}");
+        return ExitCode::FAILURE;
+    }
+    let out_path = format!("{DRIFT_DIR}/convention-drift-{}.md", table.generated);
+    if let Err(e) = std::fs::write(&out_path, rendered) {
+        eprintln!("cicatrix drift: write {out_path}: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!("{out_path}");
+    ExitCode::SUCCESS
+}
+
+/// Render a `MarkerTable` to the machine-structured convention-drift markdown. PURE: reads `root`
+/// from the table, no clock, no fs. The header em-dash is U+2014 (space-padded); the legend/columns
+/// separators are U+00B7 — both copied byte-for-byte from the seed. Always emits a `## Skipped
+/// repos` section (`None.` when empty), the `_No repos found._` body for an empty scan, and exactly
+/// one trailing newline.
+fn render_drift_table(table: &drift::MarkerTable) -> String {
+    let mut out = String::new();
+    // Line 1: header — em-dash U+2014 space-padded. The date is `table.generated` (the single
+    // source); the renderer never consults the clock, so header and filename can never diverge.
+    out.push_str(&format!(
+        "# Convention-drift scan \u{2014} {} \u{2014} {}\n",
+        table.root.display(),
+        table.generated,
+    ));
+    out.push('\n');
+    // Legend + Columns block — middle-dot U+00B7 separators, verbatim from the seed.
+    out.push_str("Legend: \u{2713} present \u{00b7} \u{2717} missing \u{00b7} ~ partial.\n");
+    out.push_str(
+        "Columns: CLAUDE=CLAUDE.md \u{00b7} MK=Makefile/justfile w/ ci target \u{00b7} \
+         PC=pre-commit \u{00b7} CI=#workflows \u{00b7}\n",
+    );
+    out.push_str(
+        "LIC=LICENSE \u{00b7} TOOL=toolchain pin \u{00b7} SR=signed-release config \u{00b7} \
+         CHG=CHANGELOG.\n",
+    );
+    out.push('\n');
+    // Table header + separator.
+    out.push_str("| Repo | lang | CLAUDE | MK | PC | CI | LIC | TOOL | SR | CHG |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|---|\n");
+    if table.rows.is_empty() {
+        out.push_str("_No repos found._\n");
+    } else {
+        for r in &table.rows {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                r.name,
+                r.lang,
+                r.claude.glyph(),
+                r.mk.glyph(),
+                r.pc.glyph(),
+                r.ci,
+                r.lic.glyph(),
+                r.tool.glyph(),
+                r.sr.glyph(),
+                r.chg.glyph(),
+            ));
+        }
+    }
+    out.push('\n');
+    // Always a Skipped section.
+    out.push_str("## Skipped repos\n\n");
+    if table.skipped.is_empty() {
+        out.push_str("None.\n");
+    } else {
+        for s in &table.skipped {
+            out.push_str(&format!("- {}: {}\n", s.name, s.reason));
+        }
+    }
+    out
+}
+
 const META_MARK_START: &str = "<!-- cicatrix:meta-patterns:start -->";
 const META_MARK_END: &str = "<!-- cicatrix:meta-patterns:end -->";
 const CLAUDE_MD: &str = "CLAUDE.md";
@@ -304,4 +486,109 @@ fn unified_diff(old: &str, new: &str, label: &str) -> String {
         out.push_str(&format!("+{line}\n"));
     }
     out
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use drift::{Lang, Mark, MarkerTable, RepoRow, RepoSkip};
+    use std::path::PathBuf;
+
+    fn row(name: &str) -> RepoRow {
+        RepoRow {
+            name: name.into(),
+            lang: Lang::Rust,
+            claude: Mark::Present,
+            mk: Mark::Partial,
+            pc: Mark::Missing,
+            ci: 0,
+            lic: Mark::Present,
+            tool: Mark::Missing,
+            sr: Mark::Partial,
+            chg: Mark::Present,
+        }
+    }
+
+    /// Structure invariants: em-dash header, middle-dot legend separators, the CI=0 digit (never a
+    /// glyph), an always-present Skipped section, and exactly one trailing newline.
+    #[test]
+    fn render_structure_and_separators() {
+        let table = MarkerTable {
+            generated: "2026-06-16".into(),
+            root: PathBuf::from("~/projects"),
+            rows: vec![row("reverie")],
+            skipped: vec![RepoSkip {
+                name: "ghost".into(),
+                reason: "not a directory: ~/projects/ghost".into(),
+            }],
+        };
+        let s = render_drift_table(&table);
+        // header em-dash U+2014, space-padded
+        assert!(
+            s.starts_with("# Convention-drift scan \u{2014} ~/projects \u{2014} 2026-06-16\n"),
+            "header: {:?}",
+            s.lines().next()
+        );
+        // legend middle-dot U+00B7
+        assert!(
+            s.contains("Legend: \u{2713} present \u{00b7} \u{2717} missing \u{00b7} ~ partial.\n")
+        );
+        // columns block both lines
+        assert!(s.contains("Columns: CLAUDE=CLAUDE.md \u{00b7}"));
+        assert!(s.contains("LIC=LICENSE \u{00b7} TOOL=toolchain pin \u{00b7}"));
+        // CI=0 renders the digit, NOT the missing glyph
+        assert!(s.contains("| reverie | rust | \u{2713} | ~ | \u{2717} | 0 | \u{2713} | \u{2717} | ~ | \u{2713} |\n"));
+        // Skipped section present with the skip line
+        assert!(s.contains("## Skipped repos\n\n- ghost: not a directory: ~/projects/ghost\n"));
+        // exactly one trailing newline
+        assert!(s.ends_with('\n') && !s.ends_with("\n\n"));
+    }
+
+    /// No skips → the literal `None.` line; the section is ALWAYS emitted.
+    #[test]
+    fn render_skipped_none_when_empty() {
+        let table = MarkerTable {
+            generated: "2026-06-16".into(),
+            root: PathBuf::from("~/projects"),
+            rows: vec![row("a")],
+            skipped: vec![],
+        };
+        let s = render_drift_table(&table);
+        assert!(s.contains("## Skipped repos\n\nNone.\n"), "{s}");
+        assert!(s.ends_with("None.\n"));
+    }
+
+    /// Empty scan → header+legend+columns+table-header, then `_No repos found._`, then Skipped.
+    #[test]
+    fn render_empty_scan_body() {
+        let table = MarkerTable {
+            generated: "2026-06-16".into(),
+            root: PathBuf::from("~/projects"),
+            rows: vec![],
+            skipped: vec![],
+        };
+        let s = render_drift_table(&table);
+        assert!(
+            s.contains("|---|---|---|---|---|---|---|---|---|---|\n_No repos found._\n"),
+            "{s}"
+        );
+        // no data rows, but the Skipped section still appears
+        assert!(s.contains("## Skipped repos\n\nNone.\n"));
+        assert!(s.ends_with('\n') && !s.ends_with("\n\n"));
+    }
+
+    /// The renderer does NOT sort — rows render in table order as given.
+    #[test]
+    fn render_preserves_row_order() {
+        let table = MarkerTable {
+            generated: "2026-06-16".into(),
+            root: PathBuf::from("~/projects"),
+            rows: vec![row("zeta"), row("alpha")],
+            skipped: vec![],
+        };
+        let s = render_drift_table(&table);
+        let zeta = s.find("| zeta |").unwrap();
+        let alpha = s.find("| alpha |").unwrap();
+        assert!(zeta < alpha, "renderer must not reorder rows");
+    }
 }

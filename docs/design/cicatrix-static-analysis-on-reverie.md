@@ -120,6 +120,10 @@ language should have?"* Reverie is **one row** in this cross-repo table.
 - **What to build (turns the table into a tool):**
   1. A `markers.toml` declaring each marker as a **presence/shape predicate** (file exists, file
      matches a pattern, GH workflow count ≥ N) per canonical template.
+     > **As built (2026-06-24):** shipped as **`markers.json`** (not `.toml`) to stay dependency-free
+     > — the crate already has `serde_json`; a TOML parser would be a new dep + a `cargo-deny` entry.
+     > The per-marker predicates live in code (`src/drift.rs`); `markers.json` carries the repo list
+     > + per-repo lang labels + the display `root`. Repo paths are tilde-expanded for scanning.
   2. A repo list with language labels (config, not hard-coded — reverie's CLAUDE.md warns against
      hard-coding the device/repo set).
   3. `cicatrix drift scan [--repo <path>]` — traverse, evaluate predicates, **regenerate**

@@ -50,7 +50,7 @@ isn't queryable at authoring time. cicatrix makes it queryable, and gates commit
 |---|---|
 | Bug-memory (markdown) | ✅ schema + 2 real seed bugs (`docs/bugs/grounded/`) |
 | Meta-pattern injection | ✅ `CLAUDE.md` (rolled-up rules) |
-| Convention-drift table | ✅ real data from the 2026-06-16 ~/projects topology survey (`drift/`) |
+| Convention-drift scanner | ✅ `drift scan` regenerates the repo × marker table from real traversal (`src/drift.rs` + `markers.json`, D0); the 2026-06-16 survey is the hand-authored seed (`drift/`) |
 | Commit-gate hook | ✅ minimal `commit-gate.sh` (green-baseline + premature-victory block) |
 | reverie bridge (`record`/`query`) | ✅ Phase 0+1 — `ReverieBridge` projects facts → `POST /observations` and queries `/search`; `--as-of` git-ancestry filter (CER-1374/1375, against local reveried) |
 | cloud-served + revenant consumption | ⬜ **next** — Phase 2/3, gated on the reverie cloud deploy (CER-1362 → OPS-271) and revenant (TOD-978) |
@@ -63,7 +63,9 @@ docs/bugs/observed/            observed-but-ungrounded bugs (NOT projected until
 drift/                         convention-drift scans (repo × marker)
 CLAUDE.md                      injected meta-patterns + project contract
 .claude/hooks/commit-gate.sh   the audit gate
-src/                           Rust crate: CLI (record/query/drift/inject/project-meta) + store trait
+markers.json                   convention-drift scanner config: tracked repo list + per-repo lang
+src/                           Rust crate: CLI (record/query/drift [scan]/inject/project-meta) + store trait
+src/drift.rs                   convention-drift scan engine (data model + per-marker heuristics)
 tests/cli.rs                   CLI behavior suite (every verb + the drift-path invariant)
 .cicatrix/establish-baseline.sh  runs the suite; writes baseline-green only on green
 .cicatrix/baseline-green       session-local marker (gitignored) the commit-gate requires

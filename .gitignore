@@ -6,3 +6,4 @@ janus-datalog/
 
 # foreign reference source (provenance, not ours to commit)
 refs/
+.blackwall/

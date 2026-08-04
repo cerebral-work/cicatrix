@@ -1,0 +1,68 @@
+Business Source License 1.1
+
+Parameters
+
+  Licensor:             cerebral-work
+  Licensed Work:        cicatrix
+  The Licensed Work:    The source code and associated documentation made
+                        available under this License, as identified by the
+                        Licensor in the header below.
+  Additional Use Grant: None
+  Change Date:          TBD — the Licensor will designate a Change Date by
+                        which the Licensed Work will become available under
+                        the Change License. Until then, the Licensed Work is
+                        available only under the terms of this Business Source
+                        License.
+  Change License:       BSD Zero Clause License (0BSD)
+
+  ----------------------------------------------------------------
+
+Business Source License 1.1
+
+Terms
+
+The Licensor hereby grants you the right to copy, modify, display, distribute,
+make available, or otherwise exploit the Licensed Work, for any purpose,
+whether commercial or non-commercial, subject to the following conditions:
+
+1. Change Date: On or after the Change Date, the Licensed Work will
+   automatically become available under the Change License, without any
+   further action by either party. Until the Change Date, this License
+   governs all use of the Licensed Work.
+
+2. Distribution: You may distribute the Licensed Work, in whole or in part,
+   provided that each recipient receives a copy of this License and the
+   above parameters.
+
+3. Modification: You may modify the Licensed Work and distribute the
+   modified work, provided that the modified work is also governed by
+   this License and includes a copy of it.
+
+4. No Warranty: The Licensed Work is provided "AS IS", without warranty of
+   any kind, express or implied, including but not limited to the
+   warranties of merchantability, fitness for a particular purpose, or
+   non-infringement. In no event shall the Licensor be liable for any
+   claim, damages, or other liability arising from the use of or inability
+   to use the Licensed Work.
+
+5. Reservation: All rights not expressly granted herein are reserved by the
+   Licensor, including but not limited to trademark rights, and the right
+   to license the Licensed Work under different terms.
+
+
+----------------------------------------------------------------
+
+The Change License: BSD Zero Clause License (0BSD)
+
+Copyright (C) 2026 by cerebral-work
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
+IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

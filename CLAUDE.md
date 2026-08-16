@@ -39,8 +39,11 @@ Do not hand-edit between the markers.
 
 <!-- cicatrix:meta-patterns:start -->
 cicatrix meta-patterns (see CLAUDE.md):
+- Contracts break silently downstream (seed: BUG_AUTH_HARDENING_STRANDED_CONSUMERS)
 - Two implementations of one fact drift (seed: BUG_BACKUP_SPLIT_BRAIN)
 - Type mismatches kill (seed: BUG_EMBED_EMPTY_INPUT_400)
+- Edge cases are real cases (seed: BUG_LCM_TURN_INDEX_COLLISION_500)
+- Bound every wait (seed: BUG_REVERIED_UNBOUNDED_SHUTDOWN_SIGKILL)
 <!-- cicatrix:meta-patterns:end -->
 
 ## Reviewer failure modes (enforced by `.claude/hooks/`, opt-in)

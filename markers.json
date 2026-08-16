@@ -1,16 +1,17 @@
 {
-  "root": "~/repos",
+  "root": "~/projects",
   "repos": [
-    { "name": "reverie", "path": "~/repos/reverie", "lang": "rust" },
-    { "name": "engram-rs", "path": "~/repos/engram-rs", "lang": "rust" },
-    { "name": "pact", "path": "~/repos/pact", "lang": "rust" },
-    { "name": "reach", "path": "~/repos/reach", "lang": "rust" },
-    { "name": "revenant", "path": "~/repos/revenant", "lang": "rust" },
-    { "name": "linearctl", "path": "~/repos/linearctl", "lang": "node" },
-    { "name": "unsigned-paas", "path": "~/repos/unsigned-paas", "lang": "tf/helm" },
-    { "name": "unsigned-gg", "path": "~/repos/unsigned-gg", "lang": "web" },
-    { "name": "cortex", "path": "~/repos/cortex" },
-    { "name": "Signal-Desktop", "path": "~/repos/Signal-Desktop", "lang": "node" },
-    { "name": "cerebral-work", "path": "~/repos/cerebral-work" }
+    { "name": "revenant", "path": "~/projects/cerebral/revenant", "lang": "rust" },
+    { "name": "unsigned-paas", "path": "~/projects/unsigned/paas", "lang": "tf/helm" },
+    { "name": "soma-os", "path": "~/projects/unsigned/soma-os", "lang": "rust" },
+    { "name": "cortex", "path": "~/projects/cerebral/cortex", "lang": "rust" },
+    { "name": "reverie", "path": "~/projects/cerebral/reverie", "lang": "rust" },
+    { "name": "linearctl", "path": "~/projects/cerebral/linearctl", "lang": "node" },
+    { "name": "terrarium", "path": "~/projects/cerebral/terrarium", "lang": "moon" },
+    { "name": "agentic", "path": "~/projects/todie/agentic", "lang": "mixed" },
+    { "name": "cicatrix", "path": "~/projects/cerebral/cicatrix", "lang": "rust" },
+    { "name": "herdr", "path": "~/projects/unsigned/herdr", "lang": "rust" },
+    { "name": "site", "path": "~/projects/unsigned/site", "lang": "web" },
+    { "name": "unsigned-gg", "path": "~/projects/unsigned/gg", "lang": "web" }
   ]
 }

@@ -32,6 +32,11 @@ checkpoint. Read before editing. Adapted from `wbrown/janus-datalog`'s method.
 - **Correctness before performance.** A fast wrong answer is a bug. → Make it right, then measure.
 - **Test structure, not just outcomes.** Many tests through one code path = false confidence.
   → Assert the shape/invariant, not only the happy-path output.
+- **A text-anchored edit is not a structural edit.** Replacing on a single-line anchor inside a
+  tree (YAML/JSON/TOML) inserts at an unknown structural position — the anchor matches, the edit
+  "succeeds", and siblings silently change parent. → Parse → mutate → serialise; or anchor on the
+  whole block. Then assert the resulting **tree**, because a renderer that resolves a missing value
+  to empty (Helm, envsubst) cannot detect it. (seed: `BUG_YAML_ANCHOR_REPARENTS_SIBLINGS`)
 
 The block below is machine-managed: `cicatrix project-meta` regenerates it from the grounded
 corpus (`docs/bugs/grounded/`). Run `cicatrix project-meta` to preview a diff, `--apply` to write.

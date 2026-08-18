@@ -16,26 +16,38 @@ pub fn parse(text: &str, slug_hint: Option<&str>) -> Result<BugFact, String> {
     let mut meta: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut sections: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut current_section: Option<String> = None;
+    // Fenced-code state (CER-2078). Inside a ``` fence, markdown structural prefixes
+    // (`# `, `## `, `- **`) are literal code, not headers/metadata — a real BugFact's
+    // Reproduction routinely embeds shell/YAML whose comment lines start with `#`. The
+    // fence line itself and its contents are preserved as prose under the current section.
+    let mut in_fence = false;
 
     for line in text.lines() {
         let trimmed = line.trim_end();
-        if let Some(rest) = trimmed.strip_prefix("## ") {
-            current_section = Some(rest.trim().to_lowercase());
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("# ") {
-            // H1 (single hash) — the bug slug. `strip_prefix("## ")` above already consumed H2s.
-            slug = Some(rest.trim().to_string());
-            current_section = None;
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("- **") {
-            // `key:** value`
-            if let Some((key, value)) = rest.split_once(":** ") {
-                meta.insert(key.trim().to_lowercase(), value.trim().to_string());
+        if trimmed.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            // fall through to append the fence delimiter to the current section
+        } else if !in_fence {
+            if let Some(rest) = trimmed.strip_prefix("## ") {
+                current_section = Some(rest.trim().to_lowercase());
+                continue;
             }
-            continue;
+            if let Some(rest) = trimmed.strip_prefix("# ") {
+                // H1 (single hash) — the bug slug. The `## ` arm above already consumed H2s.
+                slug = Some(rest.trim().to_string());
+                current_section = None;
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("- **") {
+                // `key:** value`
+                if let Some((key, value)) = rest.split_once(":** ") {
+                    meta.insert(key.trim().to_lowercase(), value.trim().to_string());
+                }
+                continue;
+            }
         }
+        // Prose (outside a fence), or any line inside a fence, or a fence delimiter:
+        // literal content of the current section.
         if let Some(sec) = &current_section {
             let buf = sections.entry(sec.clone()).or_default();
             if !buf.is_empty() {
@@ -193,6 +205,44 @@ mod tests {
         let f = parse(&text, None).expect("should parse");
         assert_eq!(f.scope.as_deref(), Some("crates/reverie-store"));
         assert!(f.do_not_generalize);
+    }
+
+    /// Fenced code blocks are literal content, not markdown structure (CER-2078). A real
+    /// BugFact's Reproduction/Root-cause routinely embeds shell/YAML whose lines start with
+    /// `# `, `## `, or `- **`; those must NOT be read as the slug / a section header / a
+    /// metadata field. Regression for the live break: a `# comment` inside a ```bash fence
+    /// clobbered the slug so it no longer started with `BUG_`.
+    #[test]
+    fn fenced_code_block_content_is_not_parsed_as_structure() {
+        let text = "# BUG_FENCE\n\
+            \n\
+            - **id:** bug:fence\n\
+            - **files:** src/a.rs\n\
+            - **fix-commit:** #7 (CER-1)\n\
+            - **regression-test:** fence guard\n\
+            - **meta-pattern:** Edge cases are real cases\n\
+            \n\
+            ## Symptom\n\
+            It broke on deploy.\n\
+            \n\
+            ## Reproduction\n\
+            ```bash\n\
+            # The break appears only when the API server validates the object.\n\
+            ## not a section either\n\
+            - **not-a-field:** and neither is this\n\
+            helm template .\n\
+            ```\n\
+            \n\
+            ## Root cause\n\
+            A boundary error.\n";
+        let f = parse(text, None).expect("should parse");
+        // The slug is the real H1, NOT the code comment.
+        assert_eq!(f.id, "BUG_FENCE", "slug clobbered by a fenced `# ` line");
+        // The fenced `- **not-a-field:**` line did not become metadata.
+        assert_eq!(f.meta_pattern, "Edge cases are real cases");
+        // The fenced `## not a section` line did not create/switch a section; the real
+        // Symptom is intact and the fenced text lives under Reproduction, not as its own key.
+        assert_eq!(f.symptom, "It broke on deploy.");
     }
 
     /// Structural guard against schema drift: every real seed bug must parse cleanly.

@@ -160,24 +160,35 @@ jobs:
 
           If the diff is trivial (dependabot, formatting, docs), return verdict=approved with an empty findings array."
 
-          # Call the LiteLLM gateway (OpenAI-compatible API)
-          AUTH_HEADER=""
+          # Call the LiteLLM gateway (OpenAI-compatible API).
+          # Build the JSON body once — jq escapes the diff/title/body safely — and
+          # pass it as a single -d argument. NEVER eval this: REVIEW_PROMPT embeds
+          # attacker-influenceable PR title/body/diff, so eval-reparsing it is both a
+          # correctness bug (newlines in the file list get run as commands — the
+          # "line 88: nCLAUDE.md...: No such file or directory" failure) AND a
+          # command-injection vector on the runner. Conditional auth header without
+          # eval, via a plain if/else.
+          PAYLOAD=$(jq -nc \
+            --arg model "$AGENT_JURY_MODEL" \
+            --arg prompt "$REVIEW_PROMPT" \
+            '{model: $model, messages: [{role: "user", content: $prompt}], temperature: 0.3, max_tokens: 2000}')
+
           if [ -n "$LITELLM_KEY" ]; then
-            AUTH_HEADER="-H \"Authorization: Bearer $LITELLM_KEY\""
+            RESPONSE=$(curl -sf -m 120 -X POST "$LITELLM_URL/chat/completions" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $LITELLM_KEY" \
+              -d "$PAYLOAD" 2>&1) && RC=0 || RC=$?
+          else
+            RESPONSE=$(curl -sf -m 120 -X POST "$LITELLM_URL/chat/completions" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD" 2>&1) && RC=0 || RC=$?
           fi
 
-          RESPONSE=$(eval curl -sf -m 120 -X POST "\"$LITELLM_URL/chat/completions\"" \
-            -H "\"Content-Type: application/json\"" \
-            $AUTH_HEADER \
-            -d "$(jq -nc \
-              --arg model "$AGENT_JURY_MODEL" \
-              --arg prompt "$REVIEW_PROMPT" \
-              '{model: $model, messages: [{role: "user", content: $prompt}], temperature: 0.3, max_tokens: 2000}')" \
-            2>&1) || {
-              echo "review_failed=true" >> "$GITHUB_OUTPUT"
-              echo "GLM-5.2 review request failed: $RESPONSE" >&2
-              exit 0  # Don't fail the workflow — review is advisory
-            }
+          if [ "${RC:-0}" -ne 0 ]; then
+            echo "review_failed=true" >> "$GITHUB_OUTPUT"
+            echo "GLM-5.2 review request failed: $RESPONSE" >&2
+            exit 0  # Don't fail the workflow — review is advisory
+          fi
 
           # Extract the content from the OpenAI-format response
           CONTENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null)

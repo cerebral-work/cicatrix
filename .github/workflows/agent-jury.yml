@@ -71,7 +71,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           # Save diff to file for the review step (avoids env var size limits)
-          echo "$DIFF_TRUNCATED" > /tmp/pr-diff.txt
+          echo "$DIFF_TRUNCATED" > "${RUNNER_TEMP:-/tmp}/pr-diff.txt"
 
       - name: Run GLM-5.2 review
         id: review
@@ -88,7 +88,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          DIFF=$(cat /tmp/pr-diff.txt)
+          DIFF=$(cat "${RUNNER_TEMP:-/tmp}/pr-diff.txt")
 
           # Build the review prompt
           # Detect primary language from file extensions in the diff
@@ -190,8 +190,12 @@ jobs:
             exit 0  # Don't fail the workflow — review is advisory
           fi
 
-          # Extract the content from the OpenAI-format response
-          CONTENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+          # Extract the content from the OpenAI-format response.
+          # `|| CONTENT=""` is load-bearing, not defensive noise: jq exits 5 on malformed
+          # input, and under `set -euo pipefail` a bare assignment would abort the step
+          # right here — leaving the guard below as dead code and `review_failed` unwritten.
+          # See docs/bugs/grounded/BUG_JURY_GUARD_UNREACHABLE_UNDER_SET_E.md.
+          CONTENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null) || CONTENT=""
 
           if [ -z "$CONTENT" ]; then
             echo "review_failed=true" >> "$GITHUB_OUTPUT"
@@ -200,10 +204,12 @@ jobs:
           fi
 
           # Save raw content for debugging
-          echo "$CONTENT" > /tmp/jury-raw.txt
+          echo "$CONTENT" > "${RUNNER_TEMP:-/tmp}/jury-raw.txt"
 
-          # Try to parse as JSON (strip markdown fences if present)
-          CLEAN=$(echo "$CONTENT" | sed 's/^```json//; s/^```//; s/```$//' | jq '.' 2>/dev/null)
+          # Try to parse as JSON (strip markdown fences if present). Same `|| CLEAN=""`
+          # reasoning as above — a model that answers in prose is the common case, not the
+          # exception, and it must land in the guard rather than kill the step.
+          CLEAN=$(echo "$CONTENT" | sed 's/^```json//; s/^```//; s/```$//' | jq '.' 2>/dev/null) || CLEAN=""
 
           if [ -z "$CLEAN" ]; then
             echo "review_failed=true" >> "$GITHUB_OUTPUT"
@@ -214,12 +220,14 @@ jobs:
           VERDICT=$(echo "$CLEAN" | jq -r '.verdict // "needs-changes"')
           CONFIDENCE=$(echo "$CLEAN" | jq -r '.confidence // "low"')
           SUMMARY=$(echo "$CLEAN" | jq -r '.summary // "No summary provided"')
-          FINDINGS_COUNT=$(echo "$CLEAN" | jq '.findings | length')
+          # `.findings` may be absent or not an array when the model half-follows the schema;
+          # `// []` keeps that from aborting the step after a verdict was already produced.
+          FINDINGS_COUNT=$(echo "$CLEAN" | jq '(.findings // []) | length' 2>/dev/null) || FINDINGS_COUNT=0
 
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
           echo "confidence=$CONFIDENCE" >> "$GITHUB_OUTPUT"
           echo "findings_count=$FINDINGS_COUNT" >> "$GITHUB_OUTPUT"
-          echo "$CLEAN" > /tmp/jury-parsed.json
+          echo "$CLEAN" > "${RUNNER_TEMP:-/tmp}/jury-parsed.json"
 
       - name: Post review comment + stamp label
         if: always()
@@ -239,7 +247,14 @@ jobs:
           gh pr edit "$PR_NUMBER" --remove-label "agent-jury-needs-changes" 2>/dev/null || true
           gh pr edit "$PR_NUMBER" --remove-label "agent-jury-changes-requested" 2>/dev/null || true
 
-          if [ "$REVIEW_FAILED" = "true" ]; then
+          # This step is `if: always()`, so it also runs when the review step never finished
+          # (crash, timeout, cancellation). Treat a missing parsed-JSON file as a failed
+          # review: report it as a comment the way a gateway error is reported. Reading the
+          # file unconditionally turned every upstream breakage into a bare `cat: No such
+          # file` and a red gate no reviewer could interpret.
+          JURY_FILE="${RUNNER_TEMP:-/tmp}/jury-parsed.json"
+
+          if [ "${REVIEW_FAILED:-}" = "true" ] || [ ! -f "$JURY_FILE" ]; then
             LABEL="agent-jury-needs-changes"
             BODY="## 🤖 Agent Jury — Review Failed
 
@@ -257,7 +272,7 @@ jobs:
           fi
 
           # Build the review body from the parsed JSON
-          JURY_JSON=$(cat /tmp/jury-parsed.json)
+          JURY_JSON=$(cat "$JURY_FILE")
 
           # Map verdict to label + emoji
           case "$VERDICT" in

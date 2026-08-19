@@ -13,6 +13,12 @@ All notable changes to cicatrix are recorded here. Format follows
 
 ## [Unreleased]
 
+### Removed
+- Agent Jury's `Auto-merge on approval` step, which ran `gh pr merge --squash --delete-branch`
+  on an `approved` model verdict (operator ruling 2026-08-19, CER-2077). Merging main is
+  operator-gated and the merge-style SOP forbids squash. The jury is advisory: it comments and
+  labels, a human merges.
+
 ### Fixed
 - Agent Jury CI gate no longer fails without a verdict (CER-2077). Under `set -euo pipefail`,
   `jq` exiting 5 on malformed input aborted the review step at the capture assignment, making

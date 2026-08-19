@@ -190,7 +190,7 @@ fn review_step_survives_non_json_model_content() {
 
     assert_eq!(
         code, 0,
-        "review step must not abort on unparseable model output. stderr: {err}"
+        "review step must not abort on unparsable model output. stderr: {err}"
     );
     assert!(
         h.github_output().contains("review_failed=true"),

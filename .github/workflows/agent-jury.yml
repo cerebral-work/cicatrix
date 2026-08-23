@@ -11,6 +11,12 @@ name: Agent Jury (GLM-5.2)
 # Model: glm-5.2 (served via LiteLLM gateway). Override via AGENT_JURY_MODEL env.
 # Gateway: tailnet http://llm/v1 (reachable from self-hosted ARC runners). For
 # GitHub-hosted runners, set AGENT_JURY_API_URL + AGENT_JURY_API_KEY secrets.
+#
+# THE JURY IS ADVISORY. It comments and labels; a human merges. It carried an
+# `Auto-merge on approval` step that ran `gh pr merge --squash` on an `approved`
+# verdict — removed by operator ruling 2026-08-19 (CER-2077). Merging main is an
+# operator-gated action, and the merge-style SOP forbids squash. Do not
+# reintroduce an automated merge here.
 
 on:
   pull_request:
@@ -320,29 +326,3 @@ jobs:
           # Stamp the label
           gh pr edit "$PR_NUMBER" --add-label "$LABEL" 2>/dev/null || true
           echo "Agent jury verdict: $VERDICT (label: $LABEL)"
-
-      - name: Auto-merge on approval (if not gated)
-        if: steps.review.outputs.verdict == 'approved' && steps.review.outputs.review_failed != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-        run: |
-          set -euo pipefail
-
-          # Only auto-merge if ALL required checks pass (CI Gate green).
-          # Check the PR's mergeable state and review decision.
-          MERGEABLE=$(gh pr view "$PR_NUMBER" --json mergeable --jq '.mergeable')
-          MERGE_STATE_STATUS=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.mergeable_state // "unknown"')
-
-          echo "PR mergeable: $MERGEABLE, merge_state: $MERGE_STATE_STATUS"
-
-          # mergeable_state "clean" = all checks pass, no conflicts, reviews satisfied.
-          # "behind" = needs rebase. "blocked" = reviews/checks failing. "dirty" = conflicts.
-          if [ "$MERGE_STATE_STATUS" = "clean" ]; then
-            echo "All checks pass — auto-merging (squash)..."
-            gh pr merge "$PR_NUMBER" --squash --delete-branch 2>&1 || {
-              echo "Auto-merge failed (may be blocked by branch protection or missing reviews). Skipping."
-            }
-          else
-            echo "Merge state is '$MERGE_STATE_STATUS' — not auto-merging. PR requires manual review or CI to pass."
-          fi

@@ -39,7 +39,7 @@ Do not hand-edit between the markers.
 
 <!-- cicatrix:meta-patterns:start -->
 cicatrix meta-patterns (see CLAUDE.md):
-- Contracts break silently downstream (seed: BUG_AUTH_HARDENING_STRANDED_CONSUMERS)
+- Contracts break silently downstream (seed: BUG_AUTH_HARDENING_STRANDED_CONSUMERS, BUG_JURY_GUARD_UNREACHABLE_UNDER_SET_E)
 - Two implementations of one fact drift (seed: BUG_BACKUP_SPLIT_BRAIN)
 - Type mismatches kill (seed: BUG_EMBED_EMPTY_INPUT_400)
 - Edge cases are real cases (seed: BUG_LCM_TURN_INDEX_COLLISION_500)

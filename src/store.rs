@@ -24,6 +24,10 @@ pub struct BugFact {
     /// When `true`, this fact's meta-pattern is NOT generalized into the injected/CLAUDE.md block
     /// (too narrow to promote to a project-wide rule).
     pub do_not_generalize: bool,
+    /// Turnkey trigger for a stochastic failure (e.g. the env/flag that makes it deterministic —
+    /// janus's `GOGC=1` shape). `None` for deterministic bugs and for stochastic ones with no
+    /// known reproducer.
+    pub reproducer: Option<String>,
 }
 
 impl BugFact {
@@ -114,6 +118,7 @@ mod tests {
             meta_pattern: meta_pattern.into(),
             scope: None,
             do_not_generalize: false,
+            reproducer: None,
         }
     }
 

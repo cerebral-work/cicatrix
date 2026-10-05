@@ -114,6 +114,7 @@ mod tests {
             meta_pattern: "m".into(),
             scope: None,
             do_not_generalize: false,
+            reproducer: None,
         };
         let sha_fact = BugFact {
             id: "BUG_SHA".into(),

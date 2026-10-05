@@ -50,13 +50,20 @@ pub struct ObservationPayload {
 /// Render a bug-fact as observation content. File paths are embedded verbatim so the FTS index
 /// matches a changed-file query (the `/search` tag-filter gap, design §3.2).
 pub fn render_content(fact: &BugFact) -> String {
+    // The reproducer rides the content (not a tag): it is prose for recall, not a filter handle.
+    let reproducer = fact
+        .reproducer
+        .as_ref()
+        .map(|r| format!("reproducer: {r}\n"))
+        .unwrap_or_default();
     format!(
-        "{slug}\n\nfiles: {files}\nmeta-pattern: {mp}\nfix-commit: {fc}\nregression-test: {rt}\n\n{sym}",
+        "{slug}\n\nfiles: {files}\nmeta-pattern: {mp}\nfix-commit: {fc}\nregression-test: {rt}\n{reproducer}\n{sym}",
         slug = fact.id,
         files = fact.files.join(", "),
         mp = fact.meta_pattern,
         fc = fact.fix_commit,
         rt = fact.regression_test,
+        reproducer = reproducer,
         sym = fact.symptom,
     )
 }
@@ -199,6 +206,7 @@ mod tests {
             meta_pattern: "Type mismatches kill".into(),
             scope: None,
             do_not_generalize: false,
+            reproducer: None,
         }
     }
 
@@ -218,6 +226,24 @@ mod tests {
         assert!(
             c.contains("src/a.rs:12") && c.contains("src/b.rs"),
             "paths missing: {c}"
+        );
+    }
+
+    /// The reproducer is recall prose: present in content when the fact carries one, and the
+    /// rendered line is absent entirely (not blank-valued) when it doesn't.
+    #[test]
+    fn content_carries_reproducer_only_when_present() {
+        let mut with = sample();
+        with.reproducer = Some("GOGC=1 cargo test -p store".into());
+        let c = render_content(&with);
+        assert!(
+            c.contains("reproducer: GOGC=1 cargo test -p store"),
+            "reproducer missing: {c}"
+        );
+        let without = render_content(&sample());
+        assert!(
+            !without.contains("reproducer:"),
+            "reproducer line leaked: {without}"
         );
     }
 

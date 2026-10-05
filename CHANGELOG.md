@@ -13,6 +13,16 @@ All notable changes to cicatrix are recorded here. Format follows
 
 ## [Unreleased]
 
+### Added
+- Stochastic-failure extension to the bug-doc schema (`docs/bugs/grounded/_SCHEMA.md`), ported
+  from `wbrown/janus-datalog`'s occurrence-log genre
+  (`docs/bugs/resolved/BUG_WASM_STORAGE_GC_BAD_POINTER_CRASH.md`, finalized at janus `6412d6c2`):
+  optional `- **reproducer:**` metadata (the turnkey trigger, parsed onto `BugFact` and carried
+  into the reverie projection content), `## Occurrence log` (one numbered row per sighting),
+  `## Sanctioned reruns` (rerun governance with a named end condition; absent = nothing
+  sanctioned), and Resolution guidance for the fix carrier + closing invariant. Lifecycle:
+  observed/ = open (accruing occurrences), grounded/ = resolved (sanction ended).
+
 ### Removed
 - Agent Jury's `Auto-merge on approval` step, which ran `gh pr merge --squash --delete-branch`
   on an `approved` model verdict (operator ruling 2026-08-19, CER-2077). Merging main is

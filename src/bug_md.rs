@@ -97,6 +97,10 @@ pub fn parse(text: &str, slug_hint: Option<&str>) -> Result<BugFact, String> {
         .get("do-not-generalize")
         .map(|v| matches!(v.trim().to_lowercase().as_str(), "true" | "yes" | "1"))
         .unwrap_or(false);
+    let reproducer = meta
+        .get("reproducer")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     Ok(BugFact {
         id: slug,
@@ -107,6 +111,7 @@ pub fn parse(text: &str, slug_hint: Option<&str>) -> Result<BugFact, String> {
         meta_pattern,
         scope,
         do_not_generalize,
+        reproducer,
     })
 }
 
@@ -191,6 +196,45 @@ mod tests {
         let f = parse(SAMPLE, None).expect("should parse");
         assert_eq!(f.scope, None);
         assert!(!f.do_not_generalize);
+        assert_eq!(f.reproducer, None);
+    }
+
+    /// The stochastic-failure extension (janus's occurrence-log genre, ported 2026-10-05):
+    /// `- **reproducer:**` parses onto the fact; `## Occurrence log` / `## Sanctioned reruns`
+    /// are prose sections that must not disturb the required fields.
+    #[test]
+    fn parses_stochastic_failure_shape() {
+        let text = "# BUG_FLAKE\n\
+            \n\
+            - **id:** bug:flake\n\
+            - **files:** src/wasm.rs\n\
+            - **fix-commit:** #9 (CER-2)\n\
+            - **regression-test:** wasm gate on pinned toolchain\n\
+            - **meta-pattern:** Edge cases are real cases\n\
+            - **status:** resolved\n\
+            - **reproducer:** GOGC=1 cargo test -p store\n\
+            \n\
+            ## Symptom\n\
+            Crashes at a layout-determined rate.\n\
+            \n\
+            ## Occurrence log\n\
+            | n | date | config | result |\n\
+            | 1 | 2026-10-01 | full gate | crash, poison 0x22000000 |\n\
+            | 2 | 2026-10-02 | full gate | pass |\n\
+            \n\
+            ## Sanctioned reruns\n\
+            One rerun is sanctioned for poison-shaped crashes only; ends when the pin lands.\n\
+            \n\
+            ## Root cause\n\
+            Upstream runtime defect.\n\
+            \n\
+            ## Resolution\n\
+            Toolchain pin carries the fix. Same signature on the pinned toolchain is a new bug.\n";
+        let f = parse(text, None).expect("should parse");
+        assert_eq!(f.id, "BUG_FLAKE");
+        assert_eq!(f.reproducer.as_deref(), Some("GOGC=1 cargo test -p store"));
+        assert_eq!(f.symptom, "Crashes at a layout-determined rate.");
+        assert_eq!(f.meta_pattern, "Edge cases are real cases");
     }
 
     /// Optional `scope` + `do-not-generalize` markers parse when present.

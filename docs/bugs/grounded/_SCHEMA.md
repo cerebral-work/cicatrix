@@ -19,6 +19,7 @@ record` refuses to project until they're promoted to grounded.
 - **status:** resolved | active
 - **scope:** <optional crate/path glob>           # blast-radius (see below)
 - **do-not-generalize:** true                      # optional; omit unless narrow
+- **reproducer:** <turnkey command>                # optional; stochastic bugs (see below)
 
 ## Symptom
 What was observed (the failure, not the cause).
@@ -45,3 +46,39 @@ The upstream discipline that would have prevented the whole class.
 - **do-not-generalize** (`- **do-not-generalize:** true`) — marks a fact too narrow to promote to a
   project-wide rule. Such facts are excluded from the injected / `project-meta` meta-pattern block.
   Accepts `true` / `yes` / `1`; omit the line otherwise.
+
+## Stochastic failures (the occurrence-log extension)
+
+Ported 2026-10-05 from `wbrown/janus-datalog`
+(`docs/bugs/resolved/BUG_WASM_STORAGE_GC_BAD_POINTER_CRASH.md`, finalized at commit `6412d6c2`).
+The base schema assumes a deterministic repro + regression test. A **stochastic** bug — flaky,
+layout- or timing-sensitive, not reliably reproducible on demand — records differently. Use this
+extension when a single reproduction run cannot prove or disprove the bug.
+
+Optional additions to the base doc:
+
+- **`- **reproducer:** <command>`** (metadata) — the *turnkey* trigger, if one exists: the env
+  var, flag, or load shape that makes the stochastic failure deterministic (janus's was
+  `GOGC=1 …`: constant GC turned a ~25% crash into a 4/4 reproducer). Parsed onto the fact and
+  carried into the reverie projection's content. Omit when no turnkey trigger is known.
+- **`## Occurrence log`** (section) — one numbered row per sighting, appended as the bug recurs:
+  `| n | date | config/context | result |`. Rows carry the *signature* facts (poison values,
+  discovery shapes, goroutine/test names) and cross-occurrence pattern notes ("the runs-13–16
+  value recurring in a third distinct binary"). The log is what lets a later reader recognize the
+  same bug from a single new sighting.
+- **`## Sanctioned reruns`** (section) — the rerun-governance policy while the bug is live:
+  which exact signature a CI rerun is sanctioned for, under what evidence, and the **end
+  condition** ("the sanction ends when the fix carrier lands"). A doc without this section
+  sanctions nothing — reruns of a red gate stay fail-closed by default.
+- **Resolution** gains, for bugs fixed upstream or by a carrier change: the **fix carrier**
+  (the version/pin/CL that carries the fix and how the repo enforces it, e.g. "go.mod pins 1.26.8;
+  CI reads the toolchain from go.mod") and the **closing invariant** — one sentence of the form
+  *"signature S on carrier ≥ V is a NEW bug, not this one"*, so the resolved doc can never mask a
+  recurrence.
+
+**Lifecycle.** An actively-occurring stochastic bug lives in `docs/bugs/observed/`
+(`status: active`), accruing occurrence rows; it is *not* projected. On resolution (fix carrier
+landed + gate or regression guard in place + sanction ended), promote to `grounded/` with the
+closing invariant. This mirrors janus's `docs/bugs/` (open) → `docs/bugs/resolved/` move onto
+cicatrix's own tiers: observed = open, grounded = resolved.
+

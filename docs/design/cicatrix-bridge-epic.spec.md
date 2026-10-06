@@ -23,7 +23,7 @@ networked bridge is gated on the cloud deploy path (CER-1362 → OPS-271), but P
 cicatrix makes the memory of past bug-fixes queryable at authoring time and is one **content
 producer** for the reverie memory surface (CER-1369). Every fixed bug → a reverie observation
 (`project=cicatrix`); `cicatrix query <diff>` → a reverie `/search` answering "does this diff touch
-a known-bug surface?". The markdown corpus (`docs/bugs/resolved/`) is the source of truth; reverie
+a known-bug surface?". The markdown corpus (`docs/bugs/grounded/`) is the source of truth; reverie
 is a regenerable one-way projection.
 
 **Scope of the epic:** Phases 0–3 in the design doc (§4). This issue tracks the epic; child issues
@@ -38,7 +38,7 @@ reachable reveried; Phase 3 closes the loop (revenant injects known-bug warnings
 
 No reveried required; runs in parallel with the cloud leg.
 
-- `src/bug_md.rs`: parse `docs/bugs/resolved/*.md` per `_SCHEMA.md` → `BugFact`. Pure, no network.
+- `src/bug_md.rs`: parse `docs/bugs/grounded/*.md` per `_SCHEMA.md` → `BugFact`. Pure, no network.
 - Projection builder: `BugFact` → reverie observation payload (§3.1 schema:
   `project=cicatrix`, `title=<slug>`, `content=<rendered fact>`, `tags=[file paths, meta-pattern,
   fix-commit]`, `topic_key=<meta-pattern>`). Unit-tested against a fake.

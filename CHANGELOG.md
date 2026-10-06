@@ -14,6 +14,20 @@ All notable changes to cicatrix are recorded here. Format follows
 ## [Unreleased]
 
 ### Added
+- `docs/sessions/observed/FACT_JANUS_NEVERZEROVALUE_TYPE_MISMATCH.md` — observed-tier drop:
+  janus's `:db/neverZeroValue` (janus-datalog@854bf8ef) is an upstream instance of cicatrix's
+  "type mismatches kill" meta-pattern, corroborating its generality.
+
+### Fixed
+- Stale `docs/bugs/resolved/` → `docs/bugs/grounded/` references in the integration and
+  bridge-epic design docs (the corpus was renamed; the docs still named the old tier).
+- Integration design §2.1 gains a dated upstream note: janus generalized `AsOf` to a
+  version-vector Frontier and shipped branch-Fork-from-Snapshot (PR #119); cicatrix's
+  git-ancestry `--as-of` remains the v1 mechanism.
+- Drift design §1.1 gains a D0 as-built note (the pre-D0 "prints a path" table no longer
+  describes the shipped `drift scan`).
+
+### Added
 - Stochastic-failure extension to the bug-doc schema (`docs/bugs/grounded/_SCHEMA.md`), ported
   from `wbrown/janus-datalog`'s occurrence-log genre
   (`docs/bugs/resolved/BUG_WASM_STORAGE_GC_BAD_POINTER_CRASH.md`, finalized at janus `6412d6c2`):

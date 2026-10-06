@@ -17,6 +17,50 @@ config truths, recurring failure classes — the mental-model errors) go in the 
 
 ---
 
+## Session 002 — 2026-10-05 · Refresh against janus-datalog; stochastic-failure schema port
+
+### Operator (load first)
+See Session 001 (unchanged). This session ran as an **omp lane** (`estate/w1D:p1`) on the cortex
+mesh, routed through the coordinator (`session-claude-ceres-estate-w12-p1`); merges land on
+Christian's deck click (that night: merge-on-green grant, 07:42Z).
+
+### Shipped
+- **Orientation** vs `wbrown/janus-datalog` (commits since 2026-08-19; tip `82308a6a`) →
+  `~/handoffs/2026-10-05/cicatrix-orientation.md`. Verdict: upstream work was engine-side (branch
+  Fork/Snapshot on the memory-tree store, `:db/neverZeroValue`, log-segment-shipping proposal);
+  one new regression-recording genre (stochastic occurrence log); vendored `.claude/hooks/` are
+  stale vs janus's July hook work (parked proposal P1, not picked).
+- **PR #16** (merged `11a5c88`) — ported the stochastic-failure genre: `_SCHEMA.md` extension
+  (`reproducer` field, `## Occurrence log`, `## Sanctioned reruns`, closing invariant), optional
+  `BugFact.reproducer` carried into the reverie projection, lifecycle mapping observed/=open →
+  grounded/=resolved. Drive-by: rustls 0.23.40→0.23.45 (RUSTSEC-2026-0285, lockfile-only).
+- **This branch** — doc hygiene from the same orientation: stale `docs/bugs/resolved/` →
+  `grounded/` in both design docs, janus Frontier/Fork note in integration §2.1, D0 as-built note
+  in the drift doc §1.1, observed-tier drop corroborating "type mismatches kill" with janus's
+  `:db/neverZeroValue`.
+
+### Decisions
+- Occurrence-log extension stays **optional** in the schema: deterministic bugs keep the base
+  shape; the extension exists for the flaky/layout/timing class.
+- `reproducer` projects into reverie **content**, not tags — recall prose, not a filter handle.
+- The vendored-hook re-vendor (P1) stays parked pending an explicit pick; it is the only
+  behavioral gap found and it predates the refresh window (hooks vendored 2026-06-16; janus moved
+  them 2026-07-24→31).
+
+### Open threads (park-don't-drop)
+- **P1** — re-vendor `.claude/hooks/` from janus tip (review-edit mode 9, AUTH_LEDGER walk,
+  corrected-vs-outstanding, `lib/auth_ledger.jq` + `lib/edit_evidence.sh` + hook test suite),
+  preserving local deltas (strict-bash opt-in, commit-gate, guard-main-push). Effort M.
+- **RD-12 infra adoption** — unchanged from Session 001.
+- **Session-001 branch cleanup** — `feat/cer-1397-p1-poison-gate` (remote-only, work landed) still
+  unverified-deletable; check before deleting.
+
+### How to continue
+Pick P1 if the coordinator reports a pick, else the RD-12 question. Append Session 003 above this
+block.
+
+---
+
 ## Session 001 — 2026-06-23 · Adopt terrarium CANON + dropfiles + session surfaces
 
 ### Operator (load first)

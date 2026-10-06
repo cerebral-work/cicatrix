@@ -13,7 +13,7 @@ use crate::corpus;
 use crate::store::{BugFact, BugStore};
 use serde::Serialize;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const PROJECT: &str = "cicatrix";
 pub const OBS_TYPE: &str = "bug-fact";
@@ -120,17 +120,43 @@ pub struct ReverieBridge {
     corpus_dir: PathBuf,
 }
 
+/// Standing local credential for the reverie write path: `~/.cicatrix/reverie-token` (0600).
+/// Mint with `reveried token mint --sub cicatrix --scope "mcp:read obs:write" --proj cicatrix`
+/// (the shape pinned by reveried's `cicatrix_bridge_contract` test). `REVERIE_TOKEN` env wins;
+/// the file is the fallback so shells and hooks need no export (CER-1629 fallout).
+fn default_token_path() -> Option<PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".cicatrix/reverie-token"))
+}
+
+fn token_from_file(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn resolve_token(env_token: Option<String>, file_token: Option<String>) -> Option<String> {
+    env_token
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or(file_token)
+}
+
 impl ReverieBridge {
     /// `REVERIE_URL` (default `http://127.0.0.1:7437`), bearer from `REVERIE_TOKEN` if set,
-    /// corpus from the grounded tier (default `docs/bugs/grounded`).
+    /// else `~/.cicatrix/reverie-token`; corpus from the grounded tier (default
+    /// `docs/bugs/grounded`).
     pub fn from_env() -> Self {
         let base_url = std::env::var("REVERIE_URL")
             .unwrap_or_else(|_| DEFAULT_URL.to_string())
             .trim_end_matches('/')
             .to_string();
-        let token = std::env::var("REVERIE_TOKEN")
-            .ok()
-            .filter(|s| !s.is_empty());
+        let token = resolve_token(
+            std::env::var("REVERIE_TOKEN").ok(),
+            default_token_path().as_deref().and_then(token_from_file),
+        );
         Self {
             base_url,
             token,
@@ -283,5 +309,56 @@ mod tests {
         let wrapped = serde_json::json!({"results": [{"title": "BUG_C"}]});
         assert_eq!(extract_slugs(&wrapped), vec!["BUG_C"]);
         assert!(extract_slugs(&serde_json::json!({"unexpected": true})).is_empty());
+    }
+
+    // --- token resolution: REVERIE_TOKEN env wins; ~/.cicatrix/reverie-token is the
+    // standing local credential (post-#1157 reveried auths writes; CER-1629) ---
+
+    fn tmp_token_file(name: &str, contents: Option<&str>) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("cicatrix-test-{name}-{}", std::process::id()));
+        match contents {
+            Some(c) => std::fs::write(&p, c).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+        p
+    }
+
+    #[test]
+    fn token_file_read_trims_whitespace_and_newline() {
+        let p = tmp_token_file("trim", Some("  tok-abc\n"));
+        assert_eq!(token_from_file(&p).as_deref(), Some("tok-abc"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn token_file_missing_or_blank_is_none() {
+        let missing = tmp_token_file("missing", None);
+        assert_eq!(token_from_file(&missing), None);
+        let blank = tmp_token_file("blank", Some("  \n"));
+        assert_eq!(token_from_file(&blank), None);
+        let _ = std::fs::remove_file(&blank);
+    }
+
+    #[test]
+    fn env_token_wins_over_file_token() {
+        assert_eq!(
+            resolve_token(Some(" env-tok ".into()), Some("file-tok".into())),
+            Some("env-tok".into())
+        );
+    }
+
+    #[test]
+    fn file_token_used_when_env_absent_or_empty() {
+        assert_eq!(
+            resolve_token(None, Some("file-tok".into())),
+            Some("file-tok".into())
+        );
+        assert_eq!(
+            resolve_token(Some(String::new()), Some("file-tok".into())),
+            Some("file-tok".into())
+        );
+        assert_eq!(resolve_token(None, None), None);
     }
 }

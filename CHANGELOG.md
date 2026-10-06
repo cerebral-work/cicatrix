@@ -14,6 +14,13 @@ All notable changes to cicatrix are recorded here. Format follows
 ## [Unreleased]
 
 ### Added
+- `ReverieBridge::from_env` falls back to a standing credential file at
+  `~/.cicatrix/reverie-token` (0600) when `REVERIE_TOKEN` is unset — restores the
+  `record` write path against auth-hardened reveried (post-#1157, CER-1629) without
+  requiring an export in every shell/hook. Token shape (verified against reveried's
+  `cicatrix_bridge_contract` test): `reveried token mint --sub cicatrix
+  --scope "mcp:read obs:write" --proj cicatrix --aud <REVERIE_PUBLIC_URL>`, signed with
+  the daemon's *current* keypair (the June r0 pem no longer matches — key rotation).
 - `docs/sessions/observed/FACT_JANUS_NEVERZEROVALUE_TYPE_MISMATCH.md` — observed-tier drop:
   janus's `:db/neverZeroValue` (janus-datalog@854bf8ef) is an upstream instance of cicatrix's
   "type mismatches kill" meta-pattern, corroborating its generality.

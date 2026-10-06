@@ -51,7 +51,7 @@ source→projection relationship (this is what keeps it from being cicatrix's ow
 
 | Artifact | Role | Canonical? |
 |---|---|---|
-| `docs/bugs/resolved/BUG_*.md` | Human-authored fact, version-controlled in the repo | **Source of truth** |
+| `docs/bugs/grounded/BUG_*.md` | Human-authored fact, version-controlled in the repo | **Source of truth** |
 | reverie observation (one per bug) | Queryable, embeddable projection of the fact | Derived, **regenerable** |
 
 **The projection is one-way and idempotent:** markdown → reverie, deterministic, re-runnable at
@@ -82,6 +82,15 @@ present-tense against the live set. **Edge cases to test** (cicatrix meta-patter
 not reachable from `<commit>` (different branch), an unborn/empty repo, and a `fix-commit` that *is*
 `<commit>` (inclusive boundary).
 
+> **Upstream note (2026-10-05, re-anchored against janus):** janus has since generalized
+> `AsOf(txID)` from a scalar threshold to a **version-vector Frontier** and shipped
+> branch-`Fork`-from-`Snapshot` on its memory-tree store
+> (`wbrown/janus-datalog` PR #119, tip `82308a6a`; design:
+> `docs/proposals/BRANCHING_AND_SNAPSHOTS.md`). This changes nothing for v1 — the corpus is
+> linear, single-writer, and has no branch-merge semantics to preserve — so the git-ancestry
+> filter above stands. It only re-opens the door: if cicatrix ever re-adopts a real store, the
+> branch/snapshot primitives it would need now exist upstream.
+
 ---
 
 ## 3. Leg A design — the cicatrix ↔ reverie bridge
@@ -109,7 +118,7 @@ than duplicating.
 
 ### 3.2 The two verbs, made real
 
-- **`cicatrix record`** (one mutating action): (1) append/update `docs/bugs/resolved/BUG_*.md`
+- **`cicatrix record`** (one mutating action): (1) append/update `docs/bugs/grounded/BUG_*.md`
   [canonical write]; (2) parse it to a `BugFact`; (3) `POST /observations` the projection
   [derived write]; (4) re-roll the CLAUDE.md meta-patterns section. Steps 1+4 are local and
   already partly exist; step 3 is the new `ReverieBridge` call.
@@ -127,7 +136,7 @@ not, that is a small reverie-side ask, filed then — not a v1 blocker today.
 
 - `src/store.rs`: remove the `JanusStore` framing; implement `ReverieBridge: BugStore` (HTTP
   client, endpoint from `REVERIE_URL` / bearer from env). `meta_patterns()` stays.
-- New `src/bug_md.rs`: parse `docs/bugs/resolved/*.md` per `_SCHEMA.md` → `BugFact`. **Pure,
+- New `src/bug_md.rs`: parse `docs/bugs/grounded/*.md` per `_SCHEMA.md` → `BugFact`. **Pure,
   testable, no network** — this is the Phase-0 unblocked work.
 - README + CLAUDE.md substrate blocks: amend "datalog store + reverie bridge" → "reverie is the
   store" with the §2 source/projection framing.

@@ -47,6 +47,12 @@
 | Drift test | `tests/cli.rs::drift_advertises_a_path_that_exists` | Asserts the advertised file exists on disk. The "drift-path invariant" = *don't point at a nonexistent artifact*. Nothing about scanning. |
 | Analysis deps | `Cargo.toml` | `ureq`, `serde`, `serde_json` — **no tree-sitter / syn / regex / AST** |
 
+> **As built (D0 landed, 2026-06-24; re-verified 2026-10-05):** the "prints a path" row above is
+> the pre-D0 state. `drift scan` now regenerates the table from real traversal (`src/drift.rs` +
+> `markers.json`, tilde-expanded repo paths; see README's status table and §3 item 1's as-built
+> note), and the bare `drift` verb prints the newest scan. The capability-reality gap in §2 still
+> holds for arm (b): no AST machinery exists.
+
 **The convention-marker model** (the genuinely reusable part). Nine markers tracked per repo against
 four canonical templates (`template-{rust,node,python,terraform}`):
 

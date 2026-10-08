@@ -48,7 +48,7 @@ cicatrix meta-patterns (see CLAUDE.md):
 - Two implementations of one fact drift (seed: BUG_BACKUP_SPLIT_BRAIN)
 - Type mismatches kill (seed: BUG_EMBED_EMPTY_INPUT_400)
 - Edge cases are real cases (seed: BUG_LCM_TURN_INDEX_COLLISION_500)
-- A text-anchored edit is not a structural edit (seed: BUG_MD_PARSER_FENCE_BLINDNESS)
+- A text-anchored edit is not a structural edit (seed: BUG_MD_PARSER_FENCE_BLINDNESS, BUG_YAML_ANCHOR_REPARENTS_SIBLINGS)
 - Bound every wait (seed: BUG_REVERIED_UNBOUNDED_SHUTDOWN_SIGKILL)
 <!-- cicatrix:meta-patterns:end -->
 

@@ -14,6 +14,10 @@ All notable changes to cicatrix are recorded here. Format follows
 ## [Unreleased]
 
 ### Added
+- `docs/bugs/grounded/BUG_YAML_ANCHOR_REPARENTS_SIBLINGS.md` — grounded bug-fact + new
+  meta-pattern "A text-anchored edit is not a structural edit" (scripted YAML anchor edit
+  silently re-parented siblings; Helm rendered empty strings; all gates passed). First bug
+  filed from the estate's infra side. Regression guard in revenant CI. (PR #20)
 - `ReverieBridge::from_env` falls back to a standing credential file at
   `~/.cicatrix/reverie-token` (0600) when `REVERIE_TOKEN` is unset — restores the
   `record` write path against auth-hardened reveried (post-#1157, CER-1629) without
@@ -24,6 +28,23 @@ All notable changes to cicatrix are recorded here. Format follows
 - `docs/sessions/observed/FACT_JANUS_NEVERZEROVALUE_TYPE_MISMATCH.md` — observed-tier drop:
   janus's `:db/neverZeroValue` (janus-datalog@854bf8ef) is an upstream instance of cicatrix's
   "type mismatches kill" meta-pattern, corroborating its generality.
+- Stochastic-failure extension to the bug-doc schema (`docs/bugs/grounded/_SCHEMA.md`), ported
+  from `wbrown/janus-datalog`'s occurrence-log genre
+  (`docs/bugs/resolved/BUG_WASM_STORAGE_GC_BAD_POINTER_CRASH.md`, finalized at janus `6412d6c2`):
+  optional `- **reproducer:**` metadata (the turnkey trigger, parsed onto `BugFact` and carried
+  into the reverie projection content), `## Occurrence log` (one numbered row per sighting),
+  `## Sanctioned reruns` (absent = nothing sanctioned, reruns stay fail-closed), and Resolution
+  guidance for the fix carrier + closing invariant. Lifecycle: observed/ = open (accruing
+  occurrences, unprojected) → grounded/ = resolved (sanction ended).
+
+### Removed
+- `.github/workflows/agent-jury.yml` + `tests/agent_jury_workflow.rs` — AI review gate
+  removed per operator directive 2026-10-06. Regression CI (fmt/clippy/deny/test/secrets)
+  is untouched. (PR #19)
+- Agent Jury's `Auto-merge on approval` step, which ran `gh pr merge --squash --delete-branch`
+  on an `approved` model verdict (operator ruling 2026-08-19, CER-2077). Merging main is
+  operator-gated and the merge-style SOP forbids squash. The jury is advisory: it comments and
+  labels, a human merges.
 
 ### Fixed
 - Stale `docs/bugs/resolved/` → `docs/bugs/grounded/` references in the integration and
@@ -33,24 +54,6 @@ All notable changes to cicatrix are recorded here. Format follows
   git-ancestry `--as-of` remains the v1 mechanism.
 - Drift design §1.1 gains a D0 as-built note (the pre-D0 "prints a path" table no longer
   describes the shipped `drift scan`).
-
-### Added
-- Stochastic-failure extension to the bug-doc schema (`docs/bugs/grounded/_SCHEMA.md`), ported
-  from `wbrown/janus-datalog`'s occurrence-log genre
-  (`docs/bugs/resolved/BUG_WASM_STORAGE_GC_BAD_POINTER_CRASH.md`, finalized at janus `6412d6c2`):
-  optional `- **reproducer:**` metadata (the turnkey trigger, parsed onto `BugFact` and carried
-  into the reverie projection content), `## Occurrence log` (one numbered row per sighting),
-  `## Sanctioned reruns` (rerun governance with a named end condition; absent = nothing
-  sanctioned), and Resolution guidance for the fix carrier + closing invariant. Lifecycle:
-  observed/ = open (accruing occurrences), grounded/ = resolved (sanction ended).
-
-### Removed
-- Agent Jury's `Auto-merge on approval` step, which ran `gh pr merge --squash --delete-branch`
-  on an `approved` model verdict (operator ruling 2026-08-19, CER-2077). Merging main is
-  operator-gated and the merge-style SOP forbids squash. The jury is advisory: it comments and
-  labels, a human merges.
-
-### Fixed
 - Agent Jury CI gate no longer fails without a verdict (CER-2077). Under `set -euo pipefail`,
   `jq` exiting 5 on malformed input aborted the review step at the capture assignment, making
   the `review_failed` guards below it unreachable; the `if: always()` post step then died on a
@@ -64,10 +67,6 @@ All notable changes to cicatrix are recorded here. Format follows
 - `docs/sessions/{grounded,observed}/` + `_SCHEMA.md` — session-fact drop-dir (one file per fact,
   two-tier observed→grounded); the session sibling of `docs/bugs/`. Mirrors `unsigned-paas`.
 - `CHANGELOG.md` — this file.
-- `tests/agent_jury_workflow.rs` — regression suite that extracts the real `run:` blocks from
-  `.github/workflows/agent-jury.yml` and executes them against stubbed `curl`/`gh`, so CI shell
-  logic is covered by the green-baseline gate instead of being verified by reading run logs.
-- `docs/bugs/grounded/BUG_JURY_GUARD_UNREACHABLE_UNDER_SET_E.md` — BugFact for the above.
 
 ### Changed
 - `README.md` — added a lineage block and a ground-truth pointer row (CANON / CLAUDE / SESSIONS /

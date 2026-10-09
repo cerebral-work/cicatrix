@@ -14,6 +14,9 @@ All notable changes to cicatrix are recorded here. Format follows
 ## [Unreleased]
 
 ### Added
+- Schema integrity enforcement (`:db/neverZeroValue`) in `src/bug_md.rs` and documented in `docs/bugs/grounded/_SCHEMA.md` (CER-2751). Metadata with empty strings, empty files list items, empty table cells, and missing mandatory sections fail closed with explicit `ParseError`.
+- Stochastic failure occurrence log parsing and data structures in `src/store.rs` and `src/bug_md.rs` (CER-2752). Parses markdown tables (`| n | date | config | result |`) into `OccurrenceEntry` and `StochasticSpec`.
+- Review reasoning, edit hooks, and deterministic test evidence discovery (CER-2750). Ports upstream Janus review hooks (`.claude/hooks/`), adds full transcript authorization ledger parser (`src/hooks/auth_ledger.rs`), and implements AST-based test reference verifier (`src/hooks/test_evidence.rs`).
 - `docs/design/cicatrix-regression-db-provider-roadmap.md` — architectural roadmap and specification for evolving cicatrix into an estate-wide Regression Database Provider across 5 phases (Phase 0 to Phase 4). Integrates temporal frontiers, snapshot database forking, and `:db/neverZeroValue` schema integrity (`wbrown/janus-datalog`), event-sourced durable workflows with `autumn-harvest-sqlite` WAL storage and deduplicated durable signals (`autumn-foundation/autumn-harvest`), and reversibility-gated autonomy, canary tripwires, and earned autonomy trust ladders (`wheelhorsedev/nexus`).
 - `docs/bugs/grounded/BUG_YAML_ANCHOR_REPARENTS_SIBLINGS.md` — grounded bug-fact + new
   meta-pattern "A text-anchored edit is not a structural edit" (scripted YAML anchor edit

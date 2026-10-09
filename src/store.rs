@@ -9,8 +9,26 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+/// An entry in the `## Occurrence log` table of a stochastic bug doc.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OccurrenceEntry {
+    pub n: u32,
+    pub date: String,
+    pub config: String,
+    pub result: String,
+}
+
+/// Formalized stochastic failure specification.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StochasticSpec {
+    pub reproducer_command: Option<String>,
+    pub rerun_policy: Option<String>,
+    pub closing_invariant: Option<String>,
+    pub occurrences: Vec<OccurrenceEntry>,
+}
+
 /// A fixed-bug fact, projected from a `docs/bugs/grounded/BUG_*.md` file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BugFact {
     pub id: String,
     pub files: Vec<String>,
@@ -28,6 +46,8 @@ pub struct BugFact {
     /// janus's `GOGC=1` shape). `None` for deterministic bugs and for stochastic ones with no
     /// known reproducer.
     pub reproducer: Option<String>,
+    /// Structured stochastic failure telemetry, occurrences, and rerun policies (CER-2752).
+    pub stochastic: Option<StochasticSpec>,
 }
 
 impl BugFact {
@@ -119,6 +139,7 @@ mod tests {
             scope: None,
             do_not_generalize: false,
             reproducer: None,
+            stochastic: None,
         }
     }
 

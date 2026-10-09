@@ -95,7 +95,7 @@ pub fn create_dir(tier: Tier) -> io::Result<PathBuf> {
 
 /// Read and parse all bug-facts from a tier's directory.
 pub fn read_facts(tier: Tier) -> Result<Vec<BugFact>, String> {
-    bug_md::parse_dir(&resolve_dir(tier))
+    bug_md::parse_dir(&resolve_dir(tier)).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ mod bug_md;
 mod corpus;
 mod drift;
 mod gitf;
+pub mod hooks;
 mod reverie;
 mod store;
 

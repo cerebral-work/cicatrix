@@ -115,6 +115,7 @@ mod tests {
             scope: None,
             do_not_generalize: false,
             reproducer: None,
+            stochastic: None,
         };
         let sha_fact = BugFact {
             id: "BUG_SHA".into(),

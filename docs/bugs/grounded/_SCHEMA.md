@@ -47,6 +47,14 @@ The upstream discipline that would have prevented the whole class.
   project-wide rule. Such facts are excluded from the injected / `project-meta` meta-pattern block.
   Accepts `true` / `yes` / `1`; omit the line otherwise.
 
+## Schema integrity (:db/neverZeroValue)
+
+Cicatrix enforces Datomic/Janus schema discipline: absence of an attribute is distinct from setting an explicit empty or zero value.
+- **Never zero value:** Empty strings (`""` or `''`), whitespace-only values, empty table cells, and empty list items are forbidden.
+- **Optional attributes:** To leave an optional attribute unset (such as `scope`, `reproducer`, or `do-not-generalize`), omit the line completely. Do NOT supply an empty value (for example `- **scope:** ""` or `- **scope:**` causes a parse error).
+- **Collections:** Comma-separated list attributes (such as `files`) must contain non-empty paths only (for example `foo.rs, , bar.rs` is rejected).
+- **Section prose:** Defined sections (`Symptom`, `Root cause`, `Reproduction`, `Resolution`, `Lesson`) must contain non-empty explanatory content.
+
 ## Stochastic failures (the occurrence-log extension)
 
 Ported 2026-10-05 from `wbrown/janus-datalog`

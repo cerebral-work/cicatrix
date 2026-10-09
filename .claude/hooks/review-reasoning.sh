@@ -39,6 +39,13 @@ fi
 # messages store .message.content as a STRING, structured ones as an ARRAY;
 # branch on type so both flow through. Defanged so control-looking tokens in
 # the conversation are seen as data, not as the reviewer's own verdict.
+#
+# Single-bounded: tail -300 raw transcript lines, then the jq extraction, and
+# NO further truncation of the extracted result. A second tail on top of the
+# first (as this used to do) double-bounds the same window for no reason —
+# it doesn't add safety, it just throws away more of what the first bound
+# already limited, which is how a settled ruling from earlier in a long
+# session silently disappears from what the reviewer can see (2026-07-01).
 REASONING=$(tail -300 "$TRANSCRIPT_PATH" | \
     jq -r 'select(.type == "assistant" or .type == "human" or .type == "user") |
         .type as $type |
@@ -55,9 +62,17 @@ REASONING=$(tail -300 "$TRANSCRIPT_PATH" | \
             else
                 empty
             end
-        end' 2>/dev/null | tail -75 | hook_defang) || true
+        end' 2>/dev/null | hook_defang) || true
 
-if [ -z "$REASONING" ]; then
+# Authorization ledger: a complete, non-windowed record of explicit user
+# decisions (see lib/auth_ledger.jq for why this scans the full transcript
+# instead of applying another bound). Additive to REASONING, not a
+# replacement — this exists specifically so a ruling from well outside the
+# recent-reasoning window (a plan approval, an explicit "yes, do that") is
+# never invisible to the audit just because a lot happened since.
+AUTH_LEDGER=$(jq -s -r -f "$SCRIPT_DIR/lib/auth_ledger.jq" "$TRANSCRIPT_PATH" 2>/dev/null | hook_defang) || AUTH_LEDGER=""
+
+if [ -z "$REASONING" ] && [ -z "$AUTH_LEDGER" ]; then
     exit 0
 fi
 
@@ -84,7 +99,21 @@ NONCE=$(hook_make_nonce)
 FULL_SYSTEM=$(cat "$SCRIPT_DIR/review-reasoning.system.md" "$SCRIPT_DIR/review-verdict-contract.md" | sed "s/__NONCE__/$NONCE/g")
 
 REVIEW_PROMPT="AGENT'S REASONING CHAIN (thinking + text):
-$REASONING
+$REASONING"
+
+if [ -n "$AUTH_LEDGER" ]; then
+    REVIEW_PROMPT="$REVIEW_PROMPT
+
+---
+
+USER AUTHORIZATION LEDGER (every explicit user message and plan/question
+decision from the FULL session, not just the recent window above — treat
+these as settled facts; do not re-litigate something the user already ruled
+on here just because it falls outside the reasoning chain's own window):
+$AUTH_LEDGER"
+fi
+
+REVIEW_PROMPT="$REVIEW_PROMPT
 
 ---
 

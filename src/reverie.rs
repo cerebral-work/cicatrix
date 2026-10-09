@@ -233,6 +233,7 @@ mod tests {
             scope: None,
             do_not_generalize: false,
             reproducer: None,
+            stochastic: None,
         }
     }
 

@@ -6,9 +6,13 @@ Vendored + adapted from [`wbrown/janus-datalog`](https://github.com/wbrown/janus
 
 | File | Role | Model | Default |
 |---|---|---|---|
-| `review-edit.sh` | gates each Edit/Write against 8 code failure modes (lib-mod-for-consumer-tests, weakened asserts, workarounds, code/fix without test-first, Write-vs-Edit…) | haiku | opt-in |
-| `review-reasoning.sh` | gates the thinking+text chain against 9 inference failure modes (shortcut justification, work-around-not-fix, dismissing evidence, simplify-away-the-bug…) | sonnet (low) | opt-in |
+| `gate-pretooluse.sh` | enforces single mutating action per turn (Bash solo; Edit/Write batch) | — | wired |
+| `gate-reset.sh` | resets gate lock on PostToolBatch / UserPromptSubmit / Stop | — | wired |
+| `guard-main-push.sh` | prevents accidental push directly to main branch | — | wired |
+| `review-edit.sh` | gates each Edit/Write against 8 code failure modes with Rust test-evidence pass | haiku | opt-in |
+| `review-reasoning.sh` | gates thinking+text against inference failures; checks AUTH_LEDGER via `lib/auth_ledger.jq` | sonnet (low) | opt-in |
 | `lib/review_common.sh` | nonce-stamped, defanged, **fail-closed** verdict channel (anti-forgery) | — | sourced |
+| `lib/auth_ledger.jq` | full-transcript scan extracting user directives and explicit decisions | — | sourced |
 | `review-*.system.md`, `review-verdict-contract.md` | reviewer system prompts + verdict JSON contract | — | — |
 | `commit-gate.sh` | cicatrix-native: green-baseline + premature-victory + fix-needs-test gate | — | opt-in |
 | `validate-bash.sh` | aggressive bash discipline (bans rm/&&/pipes/bare-cat). **OPT-IN:** inert unless `CICATRIX_STRICT_BASH=1` | — | off |

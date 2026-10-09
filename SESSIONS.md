@@ -15,6 +15,28 @@ This is the **narrative** continuity surface. Atomic, reusable *facts* a session
 config truths, recurring failure classes — the mental-model errors) go in the **drop-dir**,
 `docs/sessions/` (schema: `docs/sessions/_SCHEMA.md`).
 
+## Session 003 — 2026-10-09 · Ratify Regression Database Provider roadmap; GitBook MCP/CLI integration
+
+### Operator (load first)
+See Session 001 (unchanged). This session designed and ratified the architecture for cicatrix to function as an estate-wide regression database provider, integrating research from wbrown/janus-datalog, autumn-harvest, and wheelhorse by Mark Masterson.
+
+### Shipped
+- **Tooling:** Activated GitBook CLI (`/home/ctodie/.local/share/mise/installs/node/24.16.0/bin/gitbook`) and mounted `gitbook` MCP server via `/home/ctodie/.local/bin/gitbook-mcp` into `~/.gemini/config/mcp_config.json`, authenticated to the Cerebral space (`xDgjziFz7vG8U7TjXS3o`).
+- **Design Spec:** `docs/design/cicatrix-regression-db-provider-roadmap.md` — 5-phase architectural roadmap (Phase 0 to Phase 4) evolving cicatrix into an estate-wide Regression Database Provider:
+  - Version-vector temporal frontiers, snapshot DB forking, and `:db/neverZeroValue` schema integrity (wbrown/janus-datalog).
+  - Event-sourced durable workflows, `autumn-harvest-sqlite` WAL storage, deduplicated durable signals, and `#[workflow(mcp)]` plugin (autumn-foundation/autumn-harvest).
+  - Reversibility-gated autonomy pipeline, synthetic canary tripwires, correlation-masked errors, and 3-level earned autonomy trust ladder (wheelhorsedev/nexus by Mark Masterson).
+- **Artifact:** Approved roadmap artifact recorded at `~/.gemini/antigravity-cli/brain/8ed94eef-7215-47c5-aa2a-b5a4ee159675/cicatrix-regression-db-provider-roadmap.md`.
+
+### Decisions
+- **Provider Architecture:** Cicatrix evolves from a static markdown-reverie projector into an active regression database provider serving Soma run context (CER-2611), Cortex settle learning loops (CER-1827), and CAS harnesses.
+- **Dual-Tier Storage:** Local single-writer WAL engine powered by `autumn-harvest-sqlite` with backward-compatible Reverie bridge projections, federated into central PostgreSQL on Cygnus.
+- **Reversibility First:** Outward mutating agent fixes require machine-validated reversal plans; one-way doors park on durable approval signals; canary tripwire touches trigger fail-closed lockdown.
+
+### Open threads (park-don't-drop)
+- **Phase 0 Execution:** Port `AUTH_LEDGER` transcript scanner and Rust test discovery (`compute_test_evidence`) from Janus tip.
+- **RD-12 infra adoption:** Unchanged from prior sessions.
+
 ---
 
 ## Session 002 — 2026-10-05 · Refresh against janus-datalog; stochastic-failure schema port

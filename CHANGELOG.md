@@ -14,6 +14,7 @@ All notable changes to cicatrix are recorded here. Format follows
 ## [Unreleased]
 
 ### Added
+- `docs/design/cicatrix-regression-db-provider-roadmap.md` — architectural roadmap and specification for evolving cicatrix into an estate-wide Regression Database Provider across 5 phases (Phase 0 to Phase 4). Integrates temporal frontiers, snapshot database forking, and `:db/neverZeroValue` schema integrity (`wbrown/janus-datalog`), event-sourced durable workflows with `autumn-harvest-sqlite` WAL storage and deduplicated durable signals (`autumn-foundation/autumn-harvest`), and reversibility-gated autonomy, canary tripwires, and earned autonomy trust ladders (`wheelhorsedev/nexus`).
 - `docs/bugs/grounded/BUG_YAML_ANCHOR_REPARENTS_SIBLINGS.md` — grounded bug-fact + new
   meta-pattern "A text-anchored edit is not a structural edit" (scripted YAML anchor edit
   silently re-parented siblings; Helm rendered empty strings; all gates passed). First bug

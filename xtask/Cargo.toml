@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Repository automation: spec-check for EARS and headless specifications."
+
+[dependencies]

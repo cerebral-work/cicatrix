@@ -6,7 +6,7 @@ provider = "claude"
 model = "sonnet"
 
 [verify]
-command = "cargo fmt --all -- --check && cargo clippy --all-targets -j 2 -- -D warnings && cargo test -j 2"
+command = "cargo xtask spec-check -j 2 && cargo fmt --all -- --check && cargo clippy --all-targets -j 2 -- -D warnings && cargo test -j 2"
 
 [merge]
 automerge = false

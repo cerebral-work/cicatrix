@@ -75,7 +75,7 @@ SQLite   Postgres
 - [x] 3. Implement Phase 1 local embedded SQLite WAL storage engine and schema migrations.
 - [x] 4. Implement Phase 1 version-vector temporal frontier and snapshot forking primitives.
 - [x] 5. Implement Phase 2 Autumn Harvest deterministic event-sourced workflow runtime.
-- [ ] 6. Implement Phase 2 durable signal delivery with idempotency deduplication.
+- [x] 6. Implement Phase 2 durable signal delivery with idempotency deduplication.
 - [ ] 7. Implement Phase 3 Wheelhorse reversibility gate and canary tripwire defenses.
 - [ ] 8. Implement Phase 3 earned autonomy trust ladder transitions.
 - [ ] 9. Implement Phase 4 central PostgreSQL storage backend and MCP server endpoints.

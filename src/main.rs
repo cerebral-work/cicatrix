@@ -38,7 +38,7 @@ fn main() -> ExitCode {
                  query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>] | \
                  branch <fork <id> [--from <base>] [--frontier <vec>] | drop <id> | settle <id> | list | path <id>> | \
                  project-meta [--apply] | drift [scan [--repo <path>]] | \
-                 workflow <run <triage|audit> | list | status <id>>>"
+                 workflow <run <triage|audit|review-gate> | signal <id> <verdict> | list | status <id>>>"
             );
             ExitCode::FAILURE
         }
@@ -840,15 +840,16 @@ fn unified_diff(old: &str, new: &str, label: &str) -> String {
 fn cmd_workflow(rest: &[String]) -> ExitCode {
     match rest.first().map(String::as_str) {
         Some("run") => cmd_workflow_run(&rest[1..]),
+        Some("signal") => cmd_workflow_signal(&rest[1..]),
         Some("list") => cmd_workflow_list(&rest[1..]),
         Some("status") => cmd_workflow_status(&rest[1..]),
         Some(other) => {
             eprintln!("cicatrix workflow: unknown subcommand `{other}`");
-            eprintln!("usage: cicatrix workflow <run <triage|audit> [options] | list [--db <path>] | status <id> [--db <path>]>");
+            eprintln!("usage: cicatrix workflow <run <triage|audit|review-gate> [options] | signal <id> <verdict> [options] | list [--db <path>] | status <id> [--db <path>]>");
             ExitCode::FAILURE
         }
         None => {
-            eprintln!("usage: cicatrix workflow <run <triage|audit> [options] | list [--db <path>] | status <id> [--db <path>]>");
+            eprintln!("usage: cicatrix workflow <run <triage|audit|review-gate> [options] | signal <id> <verdict> [options] | list [--db <path>] | status <id> [--db <path>]>");
             ExitCode::FAILURE
         }
     }
@@ -859,16 +860,17 @@ fn cmd_workflow_run(rest: &[String]) -> ExitCode {
     match rest.first().map(String::as_str) {
         Some("triage") => cmd_workflow_run_triage(&rest[1..]),
         Some("audit") => cmd_workflow_run_audit(&rest[1..]),
+        Some("review-gate") => cmd_workflow_run_review_gate(&rest[1..]),
         Some(other) => {
             eprintln!("cicatrix workflow run: unknown workflow `{other}`");
             eprintln!(
-                "usage: cicatrix workflow run <triage <signature> [options] | audit [options]>"
+                "usage: cicatrix workflow run <triage <signature> [options] | audit [options] | review-gate <target_ref> [options]>"
             );
             ExitCode::FAILURE
         }
         None => {
             eprintln!(
-                "usage: cicatrix workflow run <triage <signature> [options] | audit [options]>"
+                "usage: cicatrix workflow run <triage <signature> [options] | audit [options] | review-gate <target_ref> [options]>"
             );
             ExitCode::FAILURE
         }
@@ -882,6 +884,7 @@ fn cmd_workflow_run_triage(rest: &[String]) -> ExitCode {
     let mut candidates = Vec::new();
     let mut failure_log = String::new();
     let mut reproducer_file: Option<String> = None;
+    let mut require_operator_review = false;
     let mut db_path_opt: Option<String> = None;
 
     let mut it = rest.iter();
@@ -915,6 +918,9 @@ fn cmd_workflow_run_triage(rest: &[String]) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
+            "--require-review" => {
+                require_operator_review = true;
+            }
             "--db" => match it.next() {
                 Some(d) => db_path_opt = Some(d.clone()),
                 None => {
@@ -940,7 +946,7 @@ fn cmd_workflow_run_triage(rest: &[String]) -> ExitCode {
     let test_signature = match signature {
         Some(s) if !s.trim().is_empty() => s,
         _ => {
-            eprintln!("usage: cicatrix workflow run triage <signature> [--repo <path>] [--candidate <commit>]... [--failure-log <text>] [--file <path>] [--db <path>]");
+            eprintln!("usage: cicatrix workflow run triage <signature> [--repo <path>] [--candidate <commit>]... [--failure-log <text>] [--file <path>] [--require-review] [--db <path>]");
             return ExitCode::FAILURE;
         }
     };
@@ -962,6 +968,7 @@ fn cmd_workflow_run_triage(rest: &[String]) -> ExitCode {
         candidate_commits: candidates,
         failure_log,
         reproducer_file,
+        require_operator_review,
     };
 
     let rt = match tokio::runtime::Runtime::new() {
@@ -993,6 +1000,15 @@ fn cmd_workflow_run_triage(rest: &[String]) -> ExitCode {
                     println!("Candidate BugFact: {} (files: {:?})", fact.id, fact.files);
                 }
                 println!("Bisection summary: {}", output.bisection.summary);
+                if let Some(ref verdict) = output.operator_verdict {
+                    println!(
+                        "Operator Verdict: {:?} by {} at {}",
+                        verdict.decision, verdict.operator, verdict.timestamp
+                    );
+                    if let Some(ref comments) = verdict.comments {
+                        println!("Comments: {}", comments);
+                    }
+                }
             }
             if let Some(err) = report.error {
                 eprintln!("Workflow error: {err}");
@@ -1003,6 +1019,275 @@ fn cmd_workflow_run_triage(rest: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("cicatrix workflow run triage: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Execute review-gate workflow.
+fn cmd_workflow_run_review_gate(rest: &[String]) -> ExitCode {
+    let mut target_ref: Option<String> = None;
+    let mut description = "Operator review gate".to_string();
+    let mut requested_by = std::env::var("USER").unwrap_or_else(|_| "operator".to_string());
+    let mut db_path_opt: Option<String> = None;
+
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--description" => match it.next() {
+                Some(d) => description = d.clone(),
+                None => {
+                    eprintln!("cicatrix workflow run review-gate: --description needs text");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--requested-by" => match it.next() {
+                Some(r) => requested_by = r.clone(),
+                None => {
+                    eprintln!("cicatrix workflow run review-gate: --requested-by needs a name");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--db" => match it.next() {
+                Some(d) => db_path_opt = Some(d.clone()),
+                None => {
+                    eprintln!("cicatrix workflow run review-gate: --db needs a path");
+                    return ExitCode::FAILURE;
+                }
+            },
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix workflow run review-gate: unknown flag {flag}");
+                return ExitCode::FAILURE;
+            }
+            pos => {
+                if target_ref.is_none() {
+                    target_ref = Some(pos.to_string());
+                } else {
+                    eprintln!(
+                        "cicatrix workflow run review-gate: unexpected extra argument `{pos}`"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
+
+    let target_ref = match target_ref {
+        Some(r) if !r.trim().is_empty() => r,
+        _ => {
+            eprintln!("usage: cicatrix workflow run review-gate <target_ref> [--description <text>] [--requested-by <name>] [--db <path>]");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let db_path = match db_path_opt {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match workflow::default_workflow_db_path() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "cicatrix workflow run review-gate: cannot resolve workflow db path: {e}"
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    let input = workflow::ReviewGateInput {
+        target_ref,
+        description: Some(description),
+        requested_by: Some(requested_by),
+    };
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("cicatrix workflow run review-gate: failed to initialize async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let result = rt.block_on(async {
+        let mut engine = workflow::WorkflowEngine::open(&db_path)?;
+        engine
+            .run_workflow::<_, workflow::ReviewGateReport>("review_gate_workflow", input)
+            .await
+    });
+
+    match result {
+        Ok(report) => {
+            println!("Workflow execution: {}", report.exec_id);
+            println!("State: {}", report.state);
+            println!(
+                "Events: {} ({} bytes)",
+                report.event_count, report.byte_size
+            );
+            if let Some(output) = report.output {
+                println!("Target Ref:   {}", output.target_ref);
+                println!(
+                    "Verdict:      {:?} by {} at {}",
+                    output.verdict.decision, output.verdict.operator, output.verdict.timestamp
+                );
+                if let Some(ref comments) = output.verdict.comments {
+                    println!("Comments:     {}", comments);
+                }
+                println!("Status:       {}", output.status);
+            }
+            if let Some(err) = report.error {
+                eprintln!("Workflow error: {err}");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            eprintln!("cicatrix workflow run review-gate: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Deliver a durable signal to a parked or running workflow execution.
+fn cmd_workflow_signal(rest: &[String]) -> ExitCode {
+    let mut exec_id: Option<String> = None;
+    let mut verdict_str: Option<String> = None;
+    let mut idempotency_key_opt: Option<String> = None;
+    let mut operator = std::env::var("USER").unwrap_or_else(|_| "operator".to_string());
+    let mut comments = "Operator sign-off".to_string();
+    let mut db_path_opt: Option<String> = None;
+
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--idempotency-key" => match it.next() {
+                Some(k) => idempotency_key_opt = Some(k.clone()),
+                None => {
+                    eprintln!("cicatrix workflow signal: --idempotency-key needs a string");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--operator" => match it.next() {
+                Some(o) => operator = o.clone(),
+                None => {
+                    eprintln!("cicatrix workflow signal: --operator needs a name");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--comments" => match it.next() {
+                Some(c) => comments = c.clone(),
+                None => {
+                    eprintln!("cicatrix workflow signal: --comments needs text");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--db" => match it.next() {
+                Some(d) => db_path_opt = Some(d.clone()),
+                None => {
+                    eprintln!("cicatrix workflow signal: --db needs a path");
+                    return ExitCode::FAILURE;
+                }
+            },
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix workflow signal: unknown flag {flag}");
+                return ExitCode::FAILURE;
+            }
+            pos => {
+                if exec_id.is_none() {
+                    exec_id = Some(pos.to_string());
+                } else if verdict_str.is_none() {
+                    verdict_str = Some(pos.to_string());
+                } else {
+                    eprintln!("cicatrix workflow signal: unexpected extra argument `{pos}`");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
+
+    let (id, verdict_input) = match (exec_id, verdict_str) {
+        (Some(i), Some(v)) if !i.trim().is_empty() && !v.trim().is_empty() => (i, v),
+        _ => {
+            eprintln!("usage: cicatrix workflow signal <id> <verdict> [--idempotency-key <key>] [--operator <name>] [--comments <text>] [--db <path>]");
+            eprintln!("verdict: approved | rejected | changes_requested");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let decision = match verdict_input.parse::<workflow::OperatorDecision>() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("cicatrix workflow signal: invalid verdict `{verdict_input}`: {e}");
+            eprintln!("allowed verdicts: approved, rejected, changes_requested");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let verdict = match workflow::OperatorVerdict::new(decision, operator, Some(comments)) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("cicatrix workflow signal: validation failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let idempotency_key = idempotency_key_opt.unwrap_or_else(|| {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        format!("sig-{ts}")
+    });
+
+    let signal = match workflow::DurableSignal::new("operator_verdict", idempotency_key, verdict) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cicatrix workflow signal: invalid signal: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let db_path = match db_path_opt {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match workflow::default_workflow_db_path() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("cicatrix workflow signal: cannot resolve workflow db path: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("cicatrix workflow signal: failed to initialize async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let result = rt.block_on(async {
+        let mut engine = workflow::WorkflowEngine::open(&db_path)?;
+        engine.deliver_signal(&id, &signal).await
+    });
+
+    match result {
+        Ok(report) => {
+            println!("Signal delivery report:");
+            println!("Execution ID:    {}", report.exec_id);
+            println!("Signal:          {}", report.signal_name);
+            println!("Idempotency Key: {}", report.idempotency_key);
+            println!(
+                "Status:          {}",
+                match report.status {
+                    workflow::SignalDeliveryStatus::Delivered => "DELIVERED",
+                    workflow::SignalDeliveryStatus::Duplicate => "DUPLICATE",
+                }
+            );
+            println!("Run State:       {}", report.run_state);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cicatrix workflow signal: {e}");
             ExitCode::FAILURE
         }
     }
@@ -1251,6 +1536,15 @@ fn cmd_workflow_status(rest: &[String]) -> ExitCode {
                 println!("Event Log ({} total):", detail.events.len());
                 for (idx, ev) in detail.events.iter().enumerate() {
                     println!("  [{idx}] {}", ev);
+                }
+            }
+            if !detail.signals.is_empty() {
+                println!("Durable Signals ({} total):", detail.signals.len());
+                for sig in &detail.signals {
+                    println!(
+                        "  [{}] signal={} key={} payload={}",
+                        sig.received_at, sig.signal_name, sig.idempotency_key, sig.payload_json
+                    );
                 }
             }
             ExitCode::SUCCESS

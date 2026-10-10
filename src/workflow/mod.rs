@@ -6,15 +6,22 @@
 
 pub mod audit;
 pub mod engine;
+pub mod signal;
 pub mod triage;
 
 pub use audit::{audit_workflow_info, AuditInput, AuditReport, TargetScanResult};
 pub use engine::{
-    get_execution_detail_from_db, list_executions_from_db, WorkflowEngine, WorkflowEngineError,
-    WorkflowExecutionDetail, WorkflowExecutionReport, WorkflowExecutionSummary,
+    get_execution_detail_from_db, init_signal_ledger_table, list_executions_from_db,
+    SignalDeliveryReport, WorkflowEngine, WorkflowEngineError, WorkflowExecutionDetail,
+    WorkflowExecutionReport, WorkflowExecutionSummary,
+};
+pub use signal::{
+    DurableSignal, OperatorDecision, OperatorVerdict, Signal, SignalDeliveryStatus,
+    StoredSignalRecord,
 };
 pub use triage::{
-    triage_workflow_info, BisectionResult, TriageInput, TriageNormalizedFailure, TriageReport,
+    review_gate_workflow, review_gate_workflow_info, triage_workflow_info, BisectionResult,
+    ReviewGateInput, ReviewGateReport, TriageInput, TriageNormalizedFailure, TriageReport,
 };
 
 use std::path::PathBuf;

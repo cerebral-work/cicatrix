@@ -2,6 +2,7 @@
 mod bug_md;
 mod corpus;
 mod drift;
+pub mod frontier;
 mod gitf;
 pub mod hooks;
 mod reverie;
@@ -28,7 +29,7 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage: cicatrix <inject [--target <path>] | record [<BUG_*.md>...] | \
-                 query <changed-file>... [--as-of <commit>] | project-meta [--apply] | \
+                 query <changed-file>... [--as-of <commit>] [--frontier <vector>] | project-meta [--apply] | \
                  drift [scan [--repo <path>]]>"
             );
             ExitCode::FAILURE
@@ -137,11 +138,13 @@ fn cmd_record(rest: &[String]) -> ExitCode {
     }
 }
 
-/// `query <changed-file>... [--as-of <commit>]` — ask reverie which known-bug surfaces the changed
-/// files touch; with `--as-of`, keep only bugs fixed at or before `<commit>` (git-ancestry).
+/// `query <changed-file>... [--as-of <commit>] [--frontier <vector>]` — ask reverie which known-bug surfaces the changed
+/// files touch; with `--as-of`, keep only bugs fixed at or before `<commit>` (git-ancestry);
+/// with `--frontier`, keep only bugs causally dominated by the given version-vector frontier cut.
 fn cmd_query(rest: &[String]) -> ExitCode {
     let mut files = Vec::new();
     let mut as_of: Option<String> = None;
+    let mut frontier_arg: Option<String> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -149,6 +152,13 @@ fn cmd_query(rest: &[String]) -> ExitCode {
                 Some(c) => as_of = Some(c.clone()),
                 None => {
                     eprintln!("cicatrix query: --as-of needs a <commit>");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--frontier" => match it.next() {
+                Some(f) => frontier_arg = Some(f.clone()),
+                None => {
+                    eprintln!("cicatrix query: --frontier needs a <vector>");
                     return ExitCode::FAILURE;
                 }
             },
@@ -160,9 +170,23 @@ fn cmd_query(rest: &[String]) -> ExitCode {
         }
     }
     if files.is_empty() {
-        eprintln!("usage: cicatrix query <changed-file>... [--as-of <commit>]");
+        eprintln!(
+            "usage: cicatrix query <changed-file>... [--as-of <commit>] [--frontier <vector>]"
+        );
         return ExitCode::FAILURE;
     }
+
+    let parsed_frontier = if let Some(f_str) = &frontier_arg {
+        match store::Frontier::parse(f_str) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                eprintln!("cicatrix query: invalid --frontier `{f_str}`: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
 
     let bridge = reverie::ReverieBridge::from_env();
     let mut hits = match bridge.touches_known_bug(&files) {
@@ -179,6 +203,18 @@ fn cmd_query(rest: &[String]) -> ExitCode {
         if !skipped.is_empty() {
             eprintln!(
                 "cicatrix query: --as-of {commit} excluded {} fact(s) with unresolvable fix-commit: {}",
+                skipped.len(),
+                skipped.join(", ")
+            );
+        }
+    }
+
+    if let Some(frontier) = &parsed_frontier {
+        let (kept, skipped) = gitf::filter_by_frontier(hits, frontier);
+        hits = kept;
+        if !skipped.is_empty() {
+            eprintln!(
+                "cicatrix query: --frontier excluded {} fact(s) not dominated by frontier: {}",
                 skipped.len(),
                 skipped.join(", ")
             );

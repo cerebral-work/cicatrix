@@ -117,6 +117,11 @@ pub fn validate_never_zero_value(fact: &BugFact) -> io::Result<()> {
             }
         }
     }
+    if let Some(frontier) = &fact.frontier {
+        frontier
+            .validate_never_zero()
+            .map_err(|e| never_zero_val("frontier", &e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -133,6 +138,8 @@ fn apply_pragmas(conn: &Connection) -> io::Result<()> {
 
 fn apply_migrations(conn: &Connection) -> io::Result<()> {
     conn.execute_batch(INITIAL_SCHEMA).map_err(sqlite_to_io)?;
+    // Idempotent migration for existing pre-frontier databases:
+    let _ = conn.execute("ALTER TABLE bug_facts ADD COLUMN frontier TEXT;", []);
     Ok(())
 }
 
@@ -151,6 +158,7 @@ pub fn default_db_path() -> PathBuf {
 /// Embedded SQLite implementation of the regression bug fact store.
 pub struct SqliteStore {
     conn: Connection,
+    #[allow(dead_code)]
     reverie: Option<ReverieBridge>,
     #[allow(dead_code)]
     db_path: Option<PathBuf>,
@@ -246,12 +254,14 @@ impl SqliteStore {
                 (None, None, None, None)
             };
 
+        let frontier_str = fact.frontier.as_ref().map(|f| f.to_string());
+
         tx.execute(
             "INSERT INTO bug_facts (
                 id, symptom, fix_commit, regression_test, meta_pattern, scope,
                 do_not_generalize, reproducer, reproducer_command, rerun_policy,
-                closing_invariant, stochastic_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                closing_invariant, stochastic_json, frontier
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 symptom = excluded.symptom,
                 fix_commit = excluded.fix_commit,
@@ -263,7 +273,8 @@ impl SqliteStore {
                 reproducer_command = excluded.reproducer_command,
                 rerun_policy = excluded.rerun_policy,
                 closing_invariant = excluded.closing_invariant,
-                stochastic_json = excluded.stochastic_json;",
+                stochastic_json = excluded.stochastic_json,
+                frontier = excluded.frontier;",
             rusqlite::params![
                 fact.id,
                 fact.symptom,
@@ -277,6 +288,7 @@ impl SqliteStore {
                 rerun_policy,
                 closing_invariant,
                 stochastic_json,
+                frontier_str,
             ],
         )
         .map_err(sqlite_to_io)?;
@@ -329,7 +341,7 @@ impl SqliteStore {
             .prepare(
                 "SELECT id, symptom, fix_commit, regression_test, meta_pattern, scope,
                         do_not_generalize, reproducer, reproducer_command, rerun_policy,
-                        closing_invariant, stochastic_json
+                        closing_invariant, stochastic_json, frontier
                  FROM bug_facts
                  WHERE id = ?1;",
             )
@@ -352,6 +364,20 @@ impl SqliteStore {
         let rerun_policy: Option<String> = row.get(9).map_err(sqlite_to_io)?;
         let closing_invariant: Option<String> = row.get(10).map_err(sqlite_to_io)?;
         let _stochastic_json: Option<String> = row.get(11).map_err(sqlite_to_io)?;
+        let frontier_str: Option<String> = row.get(12).map_err(sqlite_to_io)?;
+
+        let frontier = match frontier_str {
+            Some(s) if !s.trim().is_empty() => match crate::store::Frontier::parse(&s) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("corrupt frontier in database for bug {fact_id}: {e}"),
+                    ));
+                }
+            },
+            _ => None,
+        };
 
         let mut f_stmt = self
             .conn
@@ -412,6 +438,7 @@ impl SqliteStore {
             do_not_generalize: do_not_generalize_int != 0,
             reproducer,
             stochastic,
+            frontier,
         }))
     }
 
@@ -503,6 +530,7 @@ mod tests {
                     result: "FAIL".into(),
                 }],
             }),
+            frontier: None,
         }
     }
 
@@ -580,6 +608,11 @@ mod tests {
             st.occurrences[0].date = "  ".into();
         }
         assert!(store.record_local(&bad).is_err());
+
+        // Empty frontier
+        let mut bad = sample_fact();
+        bad.frontier = Some(crate::store::Frontier::new());
+        assert!(store.record_local(&bad).is_err());
     }
 
     #[test]
@@ -603,6 +636,27 @@ mod tests {
         assert_eq!(retrieved.do_not_generalize, fact.do_not_generalize);
         assert_eq!(retrieved.reproducer, fact.reproducer);
         assert_eq!(retrieved.stochastic, fact.stochastic);
+        assert_eq!(retrieved.frontier, None);
+    }
+
+    #[test]
+    fn roundtrip_record_and_get_with_frontier() {
+        let mut store = SqliteStore::open_in_memory().expect("open store");
+        let mut fact = sample_fact();
+        let frontier =
+            crate::store::Frontier::parse("ceres:42, cygnus:18").expect("parse frontier");
+        fact.frontier = Some(frontier.clone());
+
+        store
+            .record_local(&fact)
+            .expect("record locally with frontier");
+        let retrieved = store
+            .get_fact(&fact.id)
+            .expect("get fact")
+            .expect("fact exists");
+
+        assert_eq!(retrieved.id, fact.id);
+        assert_eq!(retrieved.frontier, Some(frontier));
     }
 
     #[test]

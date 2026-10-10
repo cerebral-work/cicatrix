@@ -1,12 +1,13 @@
-//! `--as-of <commit>` temporal filter (CER-1375, design §2.1). cicatrix preserves janus-datalog's
-//! AsOf(commit) capability without a second store by layering it over git: a bug was "known as of
-//! X" iff its fix-commit is an ancestor of X. Pure git — `git merge-base --is-ancestor`.
+//! Multi-vector temporal evaluation and version-vector frontier filtering (CER-2754, Phase 1.2).
 //!
-//! Caveat (surfaced, not hidden): the corpus may record a fix-commit as a PR ref (`#609 (CER-914)`)
-//! rather than a sha. Those can't be placed in commit history, so `--as-of` conservatively EXCLUDES
-//! them and reports the count — never a silent drop.
+//! Replaces scalar git ancestry checks with multi-vector evaluation:
+//! - Multi-head commit vectors across branch cuts (`is_ancestor_multi`, `filter_as_of_multi`).
+//! - Multi-replica version-vector causality (`filter_by_frontier`) based on Lamport clocks
+//!   and causal dominance ($A \ge B \iff \forall r \in \text{dom}(B), A(r) \ge B(r)$).
+//!
+//! Lineage: `wbrown/janus-datalog`.
 
-use crate::store::BugFact;
+use crate::store::{BugFact, Frontier};
 use std::process::{Command, Stdio};
 
 /// Pull a git-resolvable ref out of a free-form fix-commit field. Returns the first token that
@@ -38,15 +39,57 @@ pub fn is_ancestor(ancestor: &str, commit: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Multi-head ancestry check: returns true iff `ancestor` is an ancestor of (or equal to)
+/// ANY of the target heads in `target_heads`.
+pub fn is_ancestor_multi(ancestor: &str, target_heads: &[&str]) -> bool {
+    target_heads
+        .iter()
+        .any(|head| is_ancestor(ancestor, head.trim()))
+}
+
 /// Split `facts` into (kept, skipped) where kept = facts whose fix-commit resolves to an ancestor
-/// of `commit`. `skipped` carries the slugs dropped because their fix-commit wasn't a resolvable
-/// ancestor — the caller reports them so the filter is never silent.
-pub fn filter_as_of(facts: Vec<BugFact>, commit: &str) -> (Vec<BugFact>, Vec<String>) {
+/// of ANY of `target_heads`. `skipped` carries the slugs dropped because their fix-commit wasn't a
+/// resolvable ancestor of any target head — the caller reports them so the filter is never silent.
+pub fn filter_as_of_multi(
+    facts: Vec<BugFact>,
+    target_heads: &[&str],
+) -> (Vec<BugFact>, Vec<String>) {
+    if target_heads.is_empty() {
+        return (facts, Vec::new());
+    }
     let mut kept = Vec::new();
     let mut skipped = Vec::new();
     for f in facts {
         match extract_ref(&f.fix_commit) {
-            Some(r) if is_ancestor(&r, commit) => kept.push(f),
+            Some(r) if is_ancestor_multi(&r, target_heads) => kept.push(f),
+            _ => skipped.push(f.id.clone()),
+        }
+    }
+    (kept, skipped)
+}
+
+/// Backwards-compatible single-commit wrapper delegating to [`filter_as_of_multi`].
+/// Supports either a single commit hash or comma-separated commit heads (e.g. `head1,head2`).
+pub fn filter_as_of(facts: Vec<BugFact>, commit: &str) -> (Vec<BugFact>, Vec<String>) {
+    let heads: Vec<&str> = commit
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    filter_as_of_multi(facts, &heads)
+}
+
+/// Filter bug facts by a target version-vector [`Frontier`].
+///
+/// Under version-vector causality, a bug is known as-of `target` iff `target.dominates(fact_frontier)`.
+/// Facts with no recorded frontier cannot be placed in the version-vector causal history,
+/// so they are conservatively reported in `skipped` (never silently dropped).
+pub fn filter_by_frontier(facts: Vec<BugFact>, target: &Frontier) -> (Vec<BugFact>, Vec<String>) {
+    let mut kept = Vec::new();
+    let mut skipped = Vec::new();
+    for f in facts {
+        match &f.frontier {
+            Some(fact_frontier) if target.dominates(fact_frontier) => kept.push(f),
             _ => skipped.push(f.id.clone()),
         }
     }
@@ -116,6 +159,7 @@ mod tests {
             do_not_generalize: false,
             reproducer: None,
             stochastic: None,
+            frontier: None,
         };
         let sha_fact = BugFact {
             id: "BUG_SHA".into(),
@@ -128,5 +172,113 @@ mod tests {
             vec!["BUG_SHA"]
         );
         assert_eq!(skipped, vec!["BUG_PR"]); // reported, not silently gone
+    }
+
+    #[test]
+    fn multi_head_ancestry_and_filter() {
+        let head = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let head = head.trim().to_string();
+
+        assert!(is_ancestor_multi(&head, &["nonexistentref", &head]));
+        assert!(!is_ancestor_multi(
+            "0000000nonexistentref",
+            &["badref1", "badref2"]
+        ));
+
+        let fact1 = BugFact {
+            id: "BUG_HEAD".into(),
+            files: vec!["a.rs".into()],
+            symptom: "s".into(),
+            fix_commit: head.clone(),
+            regression_test: "t".into(),
+            meta_pattern: "m".into(),
+            scope: None,
+            do_not_generalize: false,
+            reproducer: None,
+            stochastic: None,
+            frontier: None,
+        };
+        let fact2 = BugFact {
+            id: "BUG_GARBAGE".into(),
+            fix_commit: "0000000nonexistentref".into(),
+            ..fact1.clone()
+        };
+
+        // Comma-separated multi-head
+        let multi_spec = format!("0000000nonexistentref, {head}");
+        let (kept, skipped) = filter_as_of(vec![fact1, fact2], &multi_spec);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "BUG_HEAD");
+        assert_eq!(skipped, vec!["BUG_GARBAGE"]);
+    }
+
+    #[test]
+    fn filter_by_version_vector_frontier() {
+        let mut target = Frontier::new();
+        target.set("ceres", 50).unwrap();
+        target.set("cygnus", 20).unwrap();
+
+        // Dominated: ceres:40, cygnus:15 (<= 50, 20)
+        let f_dominated = Frontier::parse("ceres:40, cygnus:15").unwrap();
+        // Exceeding: ceres:60 (> 50)
+        let f_exceeding = Frontier::parse("ceres:60, cygnus:10").unwrap();
+        // Concurrent: ceres:30, cygnus:25 (cygnus 25 > 20)
+        let f_concurrent = Frontier::parse("ceres:30, cygnus:25").unwrap();
+
+        let base_fact = BugFact {
+            id: "".into(),
+            files: vec!["x.rs".into()],
+            symptom: "s".into(),
+            fix_commit: "abc1234".into(),
+            regression_test: "t".into(),
+            meta_pattern: "m".into(),
+            scope: None,
+            do_not_generalize: false,
+            reproducer: None,
+            stochastic: None,
+            frontier: None,
+        };
+
+        let fact_dom = BugFact {
+            id: "BUG_DOMINATED".into(),
+            frontier: Some(f_dominated),
+            ..base_fact.clone()
+        };
+        let fact_exc = BugFact {
+            id: "BUG_EXCEEDING".into(),
+            frontier: Some(f_exceeding),
+            ..base_fact.clone()
+        };
+        let fact_con = BugFact {
+            id: "BUG_CONCURRENT".into(),
+            frontier: Some(f_concurrent),
+            ..base_fact.clone()
+        };
+        let fact_no_frontier = BugFact {
+            id: "BUG_NO_FRONTIER".into(),
+            frontier: None,
+            ..base_fact.clone()
+        };
+
+        let (kept, skipped) = filter_by_frontier(
+            vec![fact_dom, fact_exc, fact_con, fact_no_frontier],
+            &target,
+        );
+
+        assert_eq!(
+            kept.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            vec!["BUG_DOMINATED"]
+        );
+        assert_eq!(
+            skipped,
+            vec!["BUG_EXCEEDING", "BUG_CONCURRENT", "BUG_NO_FRONTIER"]
+        );
     }
 }

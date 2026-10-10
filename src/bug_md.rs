@@ -8,7 +8,7 @@
 //! Enforces Datomic-style `:db/neverZeroValue` schema integrity (CER-2751) and stochastic failure
 //! occurrences/reruns formalization (CER-2752).
 
-use crate::store::{BugFact, OccurrenceEntry, StochasticSpec};
+use crate::store::{BugFact, Frontier, FrontierError, OccurrenceEntry, StochasticSpec};
 use std::path::Path;
 
 /// Detailed parse errors enforcing schema integrity and Datomic-style `:db/neverZeroValue`
@@ -329,6 +329,33 @@ pub fn parse(text: &str, slug_hint: Option<&str>) -> Result<BugFact, ParseError>
         None
     };
 
+    // Version-vector frontier cut (CER-2754, Phase 1.2)
+    let frontier = if let Some(raw) = meta.get("frontier") {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(ParseError::NeverZeroValue {
+                field: "frontier".into(),
+                detail: "explicit empty zero value is disallowed; omit the attribute instead"
+                    .into(),
+            });
+        }
+        let parsed = Frontier::parse(trimmed).map_err(|e| match e {
+            FrontierError::EmptyString
+            | FrontierError::EmptyReplica
+            | FrontierError::ZeroTimestamp { .. } => ParseError::NeverZeroValue {
+                field: "frontier".into(),
+                detail: e.to_string(),
+            },
+            other => ParseError::NeverZeroValue {
+                field: "frontier".into(),
+                detail: other.to_string(),
+            },
+        })?;
+        Some(parsed)
+    } else {
+        None
+    };
+
     Ok(BugFact {
         id: slug,
         files,
@@ -340,6 +367,7 @@ pub fn parse(text: &str, slug_hint: Option<&str>) -> Result<BugFact, ParseError>
         do_not_generalize,
         reproducer,
         stochastic,
+        frontier,
     })
 }
 
@@ -569,6 +597,38 @@ mod tests {
         let f = parse(&text, None).expect("should parse");
         assert_eq!(f.scope.as_deref(), Some("crates/reverie-store"));
         assert!(f.do_not_generalize);
+    }
+
+    /// Optional `frontier` vector parses when present, enforcing :db/neverZeroValue.
+    #[test]
+    fn parses_optional_frontier_and_enforces_never_zero_value() {
+        let text = SAMPLE.replace(
+            "- **status:** resolved\n",
+            "- **status:** resolved\n\
+             - **frontier:** ceres:42, cygnus:18\n",
+        );
+        let f = parse(&text, None).expect("should parse");
+        let frontier = f.frontier.expect("frontier should be present");
+        assert_eq!(frontier.get("ceres"), 42);
+        assert_eq!(frontier.get("cygnus"), 18);
+
+        // Disallow empty frontier value
+        let text_empty = SAMPLE.replace(
+            "- **status:** resolved\n",
+            "- **status:** resolved\n\
+             - **frontier:** \n",
+        );
+        let err = parse(&text_empty, None).unwrap_err();
+        assert!(matches!(err, ParseError::NeverZeroValue { ref field, .. } if field == "frontier"));
+
+        // Disallow zero timestamp
+        let text_zero = SAMPLE.replace(
+            "- **status:** resolved\n",
+            "- **status:** resolved\n\
+             - **frontier:** ceres:0\n",
+        );
+        let err = parse(&text_zero, None).unwrap_err();
+        assert!(matches!(err, ParseError::NeverZeroValue { ref field, .. } if field == "frontier"));
     }
 
     /// Fenced code blocks are literal content, not markdown structure (CER-2078). A real

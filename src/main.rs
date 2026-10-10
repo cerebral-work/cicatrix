@@ -1,4 +1,5 @@
 //! cicatrix — regression-memory + convention-drift CLI.
+pub mod autonomy;
 pub mod branch;
 mod bug_md;
 mod corpus;
@@ -42,6 +43,8 @@ fn main() -> ExitCode {
         "reversibility" => cmd_reversibility(&args[1..]),
         // Synthetic canary tripwire registry & intrusion guard (CER-2760, Phase 3.2)
         "tripwire" => cmd_tripwire(&args[1..]),
+        // Earned autonomy trust ladder & promotion ledger (CER-2762, Phase 4.1)
+        "autonomy" => cmd_autonomy(&args[1..]),
         // Streaming HTTP server for cluster runners
         "serve" => cmd_serve(&args[1..]),
         _ => {
@@ -53,6 +56,7 @@ fn main() -> ExitCode {
                  workflow <run <triage|audit|review-gate> | signal <id> <verdict> | list | status <id>> | \
                  reversibility <eval|classify|plan|validate> [--diff <path>] [--tier <shadow|supervised|autonomous>] [--json] | \
                  tripwire <list [--json] | check <target> [--content <text>] [--actor <actor>] [--action <action>] [--json] | touches [--limit <N>] [--canary <id>] [--json] | seed> | \
+                 autonomy <status [--actor <actor>] [--capability <capability>] [--json] | promote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | demote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | history [--actor <actor>] [--capability <capability>] [--limit <N>] [--json] | check --actor <actor> --capability <capability> --tier <tier> [--json]> | \
                  mcp [--stdio | --http [<bind>]] [--bind <bind>] | serve [--mcp] [--bind <bind>]>"
             );
             ExitCode::FAILURE
@@ -2273,6 +2277,650 @@ fn cmd_tripwire(rest: &[String]) -> ExitCode {
         other => {
             eprintln!(
                 "cicatrix tripwire: unknown subcommand `{other}`; expected list, check, touches, or seed"
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_autonomy(rest: &[String]) -> ExitCode {
+    if rest.is_empty() {
+        eprintln!(
+            "usage: cicatrix autonomy <status [--actor <actor>] [--capability <capability>] [--json] | \
+             promote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | \
+             demote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | \
+             history [--actor <actor>] [--capability <capability>] [--limit <N>] [--json] | \
+             check --actor <actor> --capability <capability> --tier <tier> [--json]>"
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let subcmd = rest[0].as_str();
+    let sub_args = &rest[1..];
+
+    let store = match store::SqliteStore::from_env() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cicatrix autonomy: failed to open store: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match subcmd {
+        "status" => {
+            let mut actor: Option<String> = None;
+            let mut capability: Option<String> = None;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--actor" => match it.next() {
+                        Some(a) => actor = Some(a.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy status: --actor requires <actor>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--capability" => match it.next() {
+                        Some(c) => capability = Some(c.clone()),
+                        None => {
+                            eprintln!(
+                                "cicatrix autonomy status: --capability requires <capability>"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => json_output = true,
+                    unknown => {
+                        eprintln!("cicatrix autonomy status: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            if let (Some(a), Some(c)) = (actor.as_deref(), capability.as_deref()) {
+                match store.get_autonomy_state(a, c) {
+                    Ok(Some(st)) => {
+                        if json_output {
+                            match serde_json::to_string_pretty(&st) {
+                                Ok(j) => println!("{j}"),
+                                Err(e) => {
+                                    eprintln!("cicatrix autonomy status: json error: {e}");
+                                    return ExitCode::FAILURE;
+                                }
+                            }
+                        } else {
+                            println!("Actor: {}", st.actor);
+                            println!("Capability: {}", st.capability);
+                            println!("Current Tier: {}", st.current_tier);
+                            println!("Last Event: {}", st.last_event_id);
+                            println!("Updated At: {}", st.updated_at);
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Ok(None) => {
+                        if json_output {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "actor": a,
+                                    "capability": c,
+                                    "tier": "shadow",
+                                    "last_action": "default",
+                                    "authorized_by": "system",
+                                    "updated_at": null
+                                })
+                            );
+                        } else {
+                            println!("Actor: {a}");
+                            println!("Capability: {c}");
+                            println!("Current Tier: shadow (unrecorded, default)");
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("cicatrix autonomy status failed: {e}");
+                        ExitCode::FAILURE
+                    }
+                }
+            } else {
+                match store.list_autonomy_states(actor.as_deref()) {
+                    Ok(states) => {
+                        if json_output {
+                            match serde_json::to_string_pretty(&states) {
+                                Ok(j) => println!("{j}"),
+                                Err(e) => {
+                                    eprintln!("cicatrix autonomy status: json error: {e}");
+                                    return ExitCode::FAILURE;
+                                }
+                            }
+                        } else if states.is_empty() {
+                            println!("No autonomy capability states recorded.");
+                        } else {
+                            println!("Autonomy Trust Ladder States ({}):", states.len());
+                            for s in &states {
+                                println!(
+                                    "  [{}] actor: `{}` capability: `{}` (last event: {}, at: {})",
+                                    s.current_tier,
+                                    s.actor,
+                                    s.capability,
+                                    s.last_event_id,
+                                    s.updated_at
+                                );
+                            }
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("cicatrix autonomy status failed: {e}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+        }
+        "promote" => {
+            let mut actor: Option<String> = None;
+            let mut capability: Option<String> = None;
+            let mut to_tier_str: Option<String> = None;
+            let mut reason: Option<String> = None;
+            let mut authorized_by: Option<String> = None;
+            let mut evidence_json: Option<String> = None;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--actor" => match it.next() {
+                        Some(a) => actor = Some(a.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy promote: --actor requires <actor>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--capability" => match it.next() {
+                        Some(c) => capability = Some(c.clone()),
+                        None => {
+                            eprintln!(
+                                "cicatrix autonomy promote: --capability requires <capability>"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--to" => match it.next() {
+                        Some(t) => to_tier_str = Some(t.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy promote: --to requires <tier>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--reason" => match it.next() {
+                        Some(r) => reason = Some(r.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy promote: --reason requires <reason>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--authorized-by" => match it.next() {
+                        Some(ab) => authorized_by = Some(ab.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy promote: --authorized-by requires <user>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--evidence" => match it.next() {
+                        Some(ev) => {
+                            // Validate json syntax
+                            if let Err(e) = serde_json::from_str::<serde_json::Value>(ev) {
+                                eprintln!("cicatrix autonomy promote: invalid evidence json: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                            evidence_json = Some(ev.clone());
+                        }
+                        None => {
+                            eprintln!("cicatrix autonomy promote: --evidence requires <json>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => json_output = true,
+                    unknown => {
+                        eprintln!("cicatrix autonomy promote: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            let actor = match actor {
+                Some(a) => a,
+                None => {
+                    eprintln!("cicatrix autonomy promote: missing required --actor");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let capability = match capability {
+                Some(c) => c,
+                None => {
+                    eprintln!("cicatrix autonomy promote: missing required --capability");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let to_tier_str = match to_tier_str {
+                Some(t) => t,
+                None => {
+                    eprintln!("cicatrix autonomy promote: missing required --to <tier>");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let to_tier: crate::autonomy::AutonomyTier = match to_tier_str.parse() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!(
+                        "cicatrix autonomy promote: invalid target tier `{to_tier_str}`: {e}"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+            let reason = match reason {
+                Some(r) => r,
+                None => {
+                    eprintln!("cicatrix autonomy promote: missing required --reason");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let authorized_by = match authorized_by {
+                Some(ab) => ab,
+                None => {
+                    eprintln!("cicatrix autonomy promote: missing required --authorized-by");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let req = crate::autonomy::PromotionRequest {
+                actor,
+                capability,
+                target_tier: to_tier,
+                reason,
+                evidence_json,
+                authorized_by,
+            };
+
+            match store.promote_autonomy(&req) {
+                Ok(event) => {
+                    if json_output {
+                        match serde_json::to_string_pretty(&event) {
+                            Ok(j) => println!("{j}"),
+                            Err(e) => {
+                                eprintln!("cicatrix autonomy promote: json error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else {
+                        println!(
+                            "PROMOTED: actor `{}` capability `{}` from `{}` to `{}` (event_id: {})",
+                            event.actor, event.capability, event.from_tier, event.to_tier, event.id
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "status": "error",
+                                "error": e.to_string()
+                            })
+                        );
+                    } else {
+                        eprintln!("cicatrix autonomy promote failed: {e}");
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "demote" => {
+            let mut actor: Option<String> = None;
+            let mut capability: Option<String> = None;
+            let mut to_tier_str: Option<String> = None;
+            let mut reason: Option<String> = None;
+            let mut authorized_by: Option<String> = None;
+            let mut evidence_json: Option<String> = None;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--actor" => match it.next() {
+                        Some(a) => actor = Some(a.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy demote: --actor requires <actor>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--capability" => match it.next() {
+                        Some(c) => capability = Some(c.clone()),
+                        None => {
+                            eprintln!(
+                                "cicatrix autonomy demote: --capability requires <capability>"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--to" => match it.next() {
+                        Some(t) => to_tier_str = Some(t.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy demote: --to requires <tier>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--reason" => match it.next() {
+                        Some(r) => reason = Some(r.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy demote: --reason requires <reason>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--authorized-by" => match it.next() {
+                        Some(ab) => authorized_by = Some(ab.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy demote: --authorized-by requires <user>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--evidence" => match it.next() {
+                        Some(ev) => {
+                            if let Err(e) = serde_json::from_str::<serde_json::Value>(ev) {
+                                eprintln!("cicatrix autonomy demote: invalid evidence json: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                            evidence_json = Some(ev.clone());
+                        }
+                        None => {
+                            eprintln!("cicatrix autonomy demote: --evidence requires <json>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => json_output = true,
+                    unknown => {
+                        eprintln!("cicatrix autonomy demote: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            let actor = match actor {
+                Some(a) => a,
+                None => {
+                    eprintln!("cicatrix autonomy demote: missing required --actor");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let capability = match capability {
+                Some(c) => c,
+                None => {
+                    eprintln!("cicatrix autonomy demote: missing required --capability");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let to_tier_str = match to_tier_str {
+                Some(t) => t,
+                None => {
+                    eprintln!("cicatrix autonomy demote: missing required --to <tier>");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let to_tier: crate::autonomy::AutonomyTier = match to_tier_str.parse() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("cicatrix autonomy demote: invalid target tier `{to_tier_str}`: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let reason = match reason {
+                Some(r) => r,
+                None => {
+                    eprintln!("cicatrix autonomy demote: missing required --reason");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let authorized_by = match authorized_by {
+                Some(ab) => ab,
+                None => {
+                    eprintln!("cicatrix autonomy demote: missing required --authorized-by");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let req = crate::autonomy::DemotionRequest {
+                actor,
+                capability,
+                target_tier: to_tier,
+                reason,
+                evidence_json,
+                authorized_by,
+            };
+
+            match store.demote_autonomy(&req) {
+                Ok(event) => {
+                    if json_output {
+                        match serde_json::to_string_pretty(&event) {
+                            Ok(j) => println!("{j}"),
+                            Err(e) => {
+                                eprintln!("cicatrix autonomy demote: json error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else {
+                        println!(
+                            "DEMOTED: actor `{}` capability `{}` from `{}` to `{}` (event_id: {})",
+                            event.actor, event.capability, event.from_tier, event.to_tier, event.id
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "status": "error",
+                                "error": e.to_string()
+                            })
+                        );
+                    } else {
+                        eprintln!("cicatrix autonomy demote failed: {e}");
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "history" => {
+            let mut actor: Option<String> = None;
+            let mut capability: Option<String> = None;
+            let mut limit: usize = 50;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--actor" => match it.next() {
+                        Some(a) => actor = Some(a.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy history: --actor requires <actor>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--capability" => match it.next() {
+                        Some(c) => capability = Some(c.clone()),
+                        None => {
+                            eprintln!(
+                                "cicatrix autonomy history: --capability requires <capability>"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--limit" => {
+                        match it.next().and_then(|s| s.parse::<usize>().ok()) {
+                            Some(l) => limit = l,
+                            None => {
+                                eprintln!("cicatrix autonomy history: --limit requires a positive integer");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    }
+                    "--json" => json_output = true,
+                    unknown => {
+                        eprintln!("cicatrix autonomy history: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            match store.list_autonomy_history(actor.as_deref(), capability.as_deref(), Some(limit))
+            {
+                Ok(events) => {
+                    if json_output {
+                        match serde_json::to_string_pretty(&events) {
+                            Ok(j) => println!("{j}"),
+                            Err(e) => {
+                                eprintln!("cicatrix autonomy history: json error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else if events.is_empty() {
+                        println!("No autonomy audit history recorded.");
+                    } else {
+                        println!("Autonomy Audit History ({}):", events.len());
+                        for ev in &events {
+                            println!(
+                                "  [{}] event_id: {} actor: `{}` capability: `{}` action: {} ({} -> {}) by: {}",
+                                ev.created_at,
+                                ev.id,
+                                ev.actor,
+                                ev.capability,
+                                ev.action_type,
+                                ev.from_tier,
+                                ev.to_tier,
+                                ev.authorized_by
+                            );
+                            println!("      reason: {}", ev.reason);
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix autonomy history failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "check" => {
+            let mut actor: Option<String> = None;
+            let mut capability: Option<String> = None;
+            let mut required_tier_str: Option<String> = None;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--actor" => match it.next() {
+                        Some(a) => actor = Some(a.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy check: --actor requires <actor>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--capability" => match it.next() {
+                        Some(c) => capability = Some(c.clone()),
+                        None => {
+                            eprintln!(
+                                "cicatrix autonomy check: --capability requires <capability>"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--tier" => match it.next() {
+                        Some(t) => required_tier_str = Some(t.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy check: --tier requires <tier>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => json_output = true,
+                    unknown => {
+                        eprintln!("cicatrix autonomy check: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            let actor = match actor {
+                Some(a) => a,
+                None => {
+                    eprintln!("cicatrix autonomy check: missing required --actor");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let capability = match capability {
+                Some(c) => c,
+                None => {
+                    eprintln!("cicatrix autonomy check: missing required --capability");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let required_tier_str = match required_tier_str {
+                Some(t) => t,
+                None => {
+                    eprintln!("cicatrix autonomy check: missing required --tier");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let required_tier: crate::autonomy::AutonomyTier = match required_tier_str.parse() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!(
+                        "cicatrix autonomy check: invalid required tier `{required_tier_str}`: {e}"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            match store.check_autonomy(&actor, &capability, required_tier) {
+                Ok(res) => {
+                    if json_output {
+                        match serde_json::to_string_pretty(&res) {
+                            Ok(j) => println!("{j}"),
+                            Err(e) => {
+                                eprintln!("cicatrix autonomy check: json error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else if res.permitted {
+                        println!(
+                            "GRANTED: actor `{}` has sufficient tier `{}` for capability `{}` (required: `{}`)",
+                            actor, res.current_tier, capability, res.required_tier
+                        );
+                    } else {
+                        eprintln!(
+                            "DENIED: actor `{}` denied for capability `{}`: {}",
+                            actor, capability, res.reason
+                        );
+                    }
+                    if res.permitted {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
+                }
+                Err(e) => {
+                    eprintln!("cicatrix autonomy check failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        other => {
+            eprintln!(
+                "cicatrix autonomy: unknown subcommand `{other}`; expected status, promote, demote, history, or check"
             );
             ExitCode::FAILURE
         }

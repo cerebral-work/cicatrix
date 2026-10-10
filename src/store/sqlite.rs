@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 pub const INITIAL_SCHEMA: &str = include_str!("../../migrations/0001_initial_schema.sql");
 /// Tripwire registry schema migration embedded at compile time (CER-2760, Phase 3.2).
 pub const TRIPWIRE_SCHEMA: &str = include_str!("../../migrations/0002_tripwire_registry.sql");
+/// Autonomy ledger schema migration embedded at compile time (CER-2762, Phase 4.1).
+pub const AUTONOMY_SCHEMA: &str = include_str!("../../migrations/0003_autonomy_ledger.sql");
 
 fn sqlite_to_io(e: rusqlite::Error) -> io::Error {
     io::Error::other(e.to_string())
@@ -144,6 +146,9 @@ fn apply_migrations(conn: &Connection) -> io::Result<()> {
     let _ = conn.execute("ALTER TABLE bug_facts ADD COLUMN frontier TEXT;", []);
     conn.execute_batch(TRIPWIRE_SCHEMA).map_err(sqlite_to_io)?;
     let _ = crate::tripwire::seed_canaries(conn)?;
+    conn.execute_batch(AUTONOMY_SCHEMA).map_err(sqlite_to_io)?;
+    crate::autonomy::seed_default_capabilities(conn)
+        .map_err(|e| io::Error::other(e.to_string()))?;
     Ok(())
 }
 
@@ -619,6 +624,84 @@ impl SqliteStore {
     ) -> Result<(), crate::tripwire::TripwireIntrusionError> {
         crate::tripwire::guard_check(&self.conn, target, content, actor, action)
     }
+
+    // --- Autonomy trust ladder & promotion ledger (CER-2762, Phase 4.1) ---
+
+    /// Get current autonomy tier for actor and capability.
+    pub fn get_autonomy_tier(
+        &self,
+        actor: &str,
+        capability: &str,
+    ) -> Result<crate::autonomy::AutonomyTier, crate::autonomy::AutonomyError> {
+        crate::autonomy::get_tier(&self.conn, actor, capability)
+    }
+
+    /// Get detailed autonomy state for actor and capability.
+    pub fn get_autonomy_state(
+        &self,
+        actor: &str,
+        capability: &str,
+    ) -> Result<Option<crate::autonomy::AutonomyState>, crate::autonomy::AutonomyError> {
+        crate::autonomy::get_state(&self.conn, actor, capability)
+    }
+
+    /// List active autonomy states, optionally filtered by actor.
+    pub fn list_autonomy_states(
+        &self,
+        actor: Option<&str>,
+    ) -> Result<Vec<crate::autonomy::AutonomyState>, crate::autonomy::AutonomyError> {
+        crate::autonomy::list_states(&self.conn, actor)
+    }
+
+    /// Record an autonomy event in the audit ledger.
+    pub fn record_autonomy_event(
+        &self,
+        event: &crate::autonomy::AutonomyEvent,
+    ) -> Result<(), crate::autonomy::AutonomyError> {
+        crate::autonomy::record_event(&self.conn, event)
+    }
+
+    /// List audit history of autonomy events.
+    pub fn list_autonomy_history(
+        &self,
+        actor: Option<&str>,
+        capability: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<crate::autonomy::AutonomyEvent>, crate::autonomy::AutonomyError> {
+        crate::autonomy::list_events(&self.conn, actor, capability, limit.unwrap_or(50))
+    }
+
+    /// Promote an actor's capability to a higher autonomy tier.
+    pub fn promote_autonomy(
+        &self,
+        req: &crate::autonomy::PromotionRequest,
+    ) -> Result<crate::autonomy::AutonomyEvent, crate::autonomy::AutonomyError> {
+        crate::autonomy::promote_capability(&self.conn, req.clone())
+    }
+
+    /// Demote an actor's capability to a lower autonomy tier.
+    pub fn demote_autonomy(
+        &self,
+        req: &crate::autonomy::DemotionRequest,
+    ) -> Result<crate::autonomy::AutonomyEvent, crate::autonomy::AutonomyError> {
+        crate::autonomy::demote_capability(&self.conn, req.clone())
+    }
+
+    /// Check if an actor's capability has sufficient autonomy tier.
+    pub fn check_autonomy(
+        &self,
+        actor: &str,
+        capability: &str,
+        required_tier: crate::autonomy::AutonomyTier,
+    ) -> Result<crate::autonomy::AutonomyCheckResult, crate::autonomy::AutonomyError> {
+        crate::autonomy::check_capability_autonomy(
+            &self.conn,
+            actor,
+            capability,
+            required_tier,
+            None,
+        )
+    }
 }
 
 impl BugStore for SqliteStore {
@@ -965,5 +1048,30 @@ mod tests {
             )
             .expect("query tripwire_touches table");
         assert_eq!(count, 1, "tripwire_touches table must exist in schema");
+    }
+
+    #[test]
+    fn autonomy_tables_and_seeds_on_open() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let states = store.list_autonomy_states(None).expect("list states");
+        assert!(!states.is_empty(), "default capabilities should be seeded");
+
+        let code_edit = store
+            .get_autonomy_state("wheelhorse", "code_edit")
+            .expect("get state");
+        assert!(code_edit.is_some());
+        assert_eq!(
+            code_edit.unwrap().tier,
+            crate::autonomy::AutonomyTier::Autonomous
+        );
+
+        let soma_gate = store
+            .get_autonomy_state("wheelhorse", "soma_production_gate")
+            .expect("get state");
+        assert!(soma_gate.is_some());
+        assert_eq!(
+            soma_gate.unwrap().tier,
+            crate::autonomy::AutonomyTier::Supervised
+        );
     }
 }

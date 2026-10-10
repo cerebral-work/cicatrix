@@ -268,6 +268,124 @@ pub fn mcp_tools() -> Vec<McpToolDefinition> {
                 "required": ["target"]
             }),
         },
+        McpToolDefinition {
+            name: "cicatrix_get_autonomy_tier".to_string(),
+            description: "Retrieve current autonomy tier (shadow, supervised, autonomous) for an actor capability.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "capability": {
+                        "type": "string",
+                        "description": "Capability name (e.g. 'code_edit', 'soma_production_gate')"
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Actor identifier (default: 'wheelhorse')"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Optional snapshot branch identifier"
+                    }
+                },
+                "required": ["capability"]
+            }),
+        },
+        McpToolDefinition {
+            name: "cicatrix_record_autonomy_event".to_string(),
+            description: "Record an autonomy capability promotion or demotion event in the append-only ledger, enforcing Soma human-approval invariants.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "capability": {
+                        "type": "string",
+                        "description": "Capability name"
+                    },
+                    "event_type": {
+                        "type": "string",
+                        "enum": ["promote", "demote"],
+                        "description": "Event transition type: 'promote' or 'demote'"
+                    },
+                    "to_tier": {
+                        "type": "string",
+                        "enum": ["shadow", "supervised", "autonomous"],
+                        "description": "Target autonomy tier"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Justification for promotion or demotion"
+                    },
+                    "authorized_by": {
+                        "type": "string",
+                        "description": "Operator or authority authorising transition"
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Actor identifier (default: 'wheelhorse')"
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "Optional evidence payload or JSON string"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Optional snapshot branch identifier"
+                    }
+                },
+                "required": ["capability", "event_type", "to_tier", "reason", "authorized_by"]
+            }),
+        },
+        McpToolDefinition {
+            name: "cicatrix_list_autonomy_history".to_string(),
+            description: "Query append-only audit ledger of capability promotion and demotion events.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "actor": {
+                        "type": "string",
+                        "description": "Filter history by actor identifier"
+                    },
+                    "capability": {
+                        "type": "string",
+                        "description": "Filter history by capability name"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of audit events to return"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Optional snapshot branch identifier"
+                    }
+                }
+            }),
+        },
+        McpToolDefinition {
+            name: "cicatrix_check_autonomy".to_string(),
+            description: "Check if an actor has sufficient autonomy tier for a capability, enforcing Soma human-approval invariants.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "capability": {
+                        "type": "string",
+                        "description": "Capability name to evaluate"
+                    },
+                    "required_tier": {
+                        "type": "string",
+                        "enum": ["shadow", "supervised", "autonomous"],
+                        "description": "Minimum required autonomy tier"
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Actor identifier (default: 'wheelhorse')"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Optional snapshot branch identifier"
+                    }
+                },
+                "required": ["capability", "required_tier"]
+            }),
+        },
     ]
 }
 
@@ -361,6 +479,10 @@ pub async fn execute_tool(name: &str, args: &Value) -> Result<Value, ToolExecuti
         "cicatrix_submit_signal" => handle_submit_signal(args).await,
         "cicatrix_verify_reversibility" => handle_verify_reversibility(args),
         "cicatrix_check_tripwire" => handle_check_tripwire(args),
+        "cicatrix_get_autonomy_tier" => handle_get_autonomy_tier(args),
+        "cicatrix_record_autonomy_event" => handle_record_autonomy_event(args),
+        "cicatrix_list_autonomy_history" => handle_list_autonomy_history(args),
+        "cicatrix_check_autonomy" => handle_check_autonomy(args),
         other => Err(ToolExecutionError::Client(format!(
             "unknown tool `{other}`"
         ))),
@@ -931,6 +1053,215 @@ fn handle_check_tripwire(args: &Value) -> Result<Value, ToolExecutionError> {
     }
 }
 
+fn handle_get_autonomy_tier(args: &Value) -> Result<Value, ToolExecutionError> {
+    let capability = args
+        .get("capability")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ToolExecutionError::Client("missing required parameter `capability`".to_string())
+        })?;
+    if capability.trim().is_empty() {
+        return Err(ToolExecutionError::Client(
+            "parameter `capability` cannot be empty".to_string(),
+        ));
+    }
+    let actor = args
+        .get("actor")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .or_else(|| {
+            std::env::var("CICATRIX_ACTOR")
+                .ok()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+        })
+        .unwrap_or_else(|| "wheelhorse".to_string());
+    let branch = args.get("branch").and_then(Value::as_str);
+
+    let store = open_store_target(branch)?;
+    let tier = store
+        .get_autonomy_tier(&actor, capability)
+        .map_err(|e| match e {
+            crate::autonomy::AutonomyError::Database(d) => ToolExecutionError::Internal(d),
+            other => ToolExecutionError::Client(other.to_string()),
+        })?;
+
+    Ok(json!({
+        "actor": actor,
+        "capability": capability,
+        "tier": tier.as_str(),
+    }))
+}
+
+fn handle_record_autonomy_event(args: &Value) -> Result<Value, ToolExecutionError> {
+    let capability = args
+        .get("capability")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ToolExecutionError::Client("missing required parameter `capability`".to_string())
+        })?;
+    let to_tier_str = args.get("to_tier").and_then(Value::as_str).ok_or_else(|| {
+        ToolExecutionError::Client("missing required parameter `to_tier`".to_string())
+    })?;
+    let to_tier: AutonomyTier = to_tier_str.parse().map_err(|e| {
+        ToolExecutionError::Client(format!("invalid `to_tier` `{to_tier_str}`: {e}"))
+    })?;
+    let reason = args.get("reason").and_then(Value::as_str).ok_or_else(|| {
+        ToolExecutionError::Client("missing required parameter `reason`".to_string())
+    })?;
+    let authorized_by = args
+        .get("authorized_by")
+        .or_else(|| args.get("operator"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ToolExecutionError::Client(
+                "missing required parameter `authorized_by` (or `operator`)".to_string(),
+            )
+        })?;
+    let actor = args
+        .get("actor")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .or_else(|| {
+            std::env::var("CICATRIX_ACTOR")
+                .ok()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+        })
+        .unwrap_or_else(|| "wheelhorse".to_string());
+    let evidence_json = args
+        .get("evidence")
+        .or_else(|| args.get("evidence_json"))
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        });
+    let event_type = args
+        .get("event_type")
+        .or_else(|| args.get("action"))
+        .and_then(Value::as_str)
+        .unwrap_or("promote");
+    let branch = args.get("branch").and_then(Value::as_str);
+
+    let store = open_store_target(branch)?;
+
+    let event = match event_type {
+        "promote" => {
+            let req = crate::autonomy::PromotionRequest {
+                actor: actor.clone(),
+                capability: capability.to_string(),
+                target_tier: to_tier,
+                reason: reason.to_string(),
+                evidence_json,
+                authorized_by: authorized_by.to_string(),
+            };
+            store.promote_autonomy(&req).map_err(|e| match e {
+                crate::autonomy::AutonomyError::Database(d) => ToolExecutionError::Internal(d),
+                other => ToolExecutionError::Client(other.to_string()),
+            })?
+        }
+        "demote" => {
+            let req = crate::autonomy::DemotionRequest {
+                actor: actor.clone(),
+                capability: capability.to_string(),
+                target_tier: to_tier,
+                reason: reason.to_string(),
+                evidence_json,
+                authorized_by: authorized_by.to_string(),
+            };
+            store.demote_autonomy(&req).map_err(|e| match e {
+                crate::autonomy::AutonomyError::Database(d) => ToolExecutionError::Internal(d),
+                other => ToolExecutionError::Client(other.to_string()),
+            })?
+        }
+        other => {
+            return Err(ToolExecutionError::Client(format!(
+                "invalid event_type `{other}`; expected 'promote' or 'demote'"
+            )));
+        }
+    };
+
+    Ok(json!({
+        "status": "recorded",
+        "event": event,
+    }))
+}
+
+fn handle_list_autonomy_history(args: &Value) -> Result<Value, ToolExecutionError> {
+    let actor = args.get("actor").and_then(Value::as_str);
+    let capability = args.get("capability").and_then(Value::as_str);
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|l| l as usize);
+    let branch = args.get("branch").and_then(Value::as_str);
+
+    let store = open_store_target(branch)?;
+    let events = store
+        .list_autonomy_history(actor, capability, limit)
+        .map_err(|e| match e {
+            crate::autonomy::AutonomyError::Database(d) => ToolExecutionError::Internal(d),
+            other => ToolExecutionError::Client(other.to_string()),
+        })?;
+
+    let count = events.len();
+    Ok(json!({
+        "count": count,
+        "events": events,
+    }))
+}
+
+fn handle_check_autonomy(args: &Value) -> Result<Value, ToolExecutionError> {
+    let capability = args
+        .get("capability")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ToolExecutionError::Client("missing required parameter `capability`".to_string())
+        })?;
+    let tier_val = args
+        .get("required_tier")
+        .or_else(|| args.get("tier"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ToolExecutionError::Client(
+                "missing required parameter `required_tier` (or `tier`)".to_string(),
+            )
+        })?;
+    let required_tier: AutonomyTier = tier_val.parse().map_err(|e| {
+        ToolExecutionError::Client(format!("invalid required tier `{tier_val}`: {e}"))
+    })?;
+    let actor = args
+        .get("actor")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .or_else(|| {
+            std::env::var("CICATRIX_ACTOR")
+                .ok()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+        })
+        .unwrap_or_else(|| "wheelhorse".to_string());
+    let branch = args.get("branch").and_then(Value::as_str);
+
+    let store = open_store_target(branch)?;
+    let result = store
+        .check_autonomy(&actor, capability, required_tier)
+        .map_err(|e| match e {
+            crate::autonomy::AutonomyError::Database(d) => ToolExecutionError::Internal(d),
+            other => ToolExecutionError::Client(other.to_string()),
+        })?;
+
+    Ok(json!({
+        "actor": result.actor,
+        "capability": result.capability,
+        "current_tier": result.current_tier.as_str(),
+        "required_tier": result.required_tier.as_str(),
+        "permitted": result.permitted,
+        "requires_approval": result.requires_approval,
+        "reason": result.reason,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -938,7 +1269,7 @@ mod tests {
     #[test]
     fn test_mcp_tools_list_completeness() {
         let tools = mcp_tools();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 12);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"cicatrix_query_known_bugs"));
         assert!(names.contains(&"cicatrix_verify_diff"));
@@ -948,7 +1279,10 @@ mod tests {
         assert!(names.contains(&"cicatrix_start_workflow"));
         assert!(names.contains(&"cicatrix_workflow_status"));
         assert!(names.contains(&"cicatrix_submit_signal"));
-        assert!(names.contains(&"cicatrix_verify_reversibility"));
+        assert!(names.contains(&"cicatrix_get_autonomy_tier"));
+        assert!(names.contains(&"cicatrix_record_autonomy_event"));
+        assert!(names.contains(&"cicatrix_list_autonomy_history"));
+        assert!(names.contains(&"cicatrix_check_autonomy"));
     }
 
     #[test]
@@ -1111,6 +1445,63 @@ diff --git a/src/secrets.rs b/src/secrets.rs
             ToolExecutionError::Internal(e) => {
                 panic!("expected client error on intrusion, got Internal({e})")
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_autonomy_mcp_tools() {
+        // 1. Get tier for seeded autonomous capability
+        let args = json!({
+            "capability": "code_edit",
+            "actor": "wheelhorse"
+        });
+        let res = handle_get_autonomy_tier(&args).expect("get autonomy tier succeeds");
+        assert_eq!(res["tier"], "autonomous");
+
+        // 2. Unrecorded capability defaults to shadow
+        let args_unrec = json!({
+            "capability": "speculative_optimizer",
+            "actor": "wheelhorse"
+        });
+        let res = handle_get_autonomy_tier(&args_unrec).expect("get tier for unrecorded");
+        assert_eq!(res["tier"], "shadow");
+
+        // 3. Check autonomy
+        let args_check = json!({
+            "capability": "code_edit",
+            "actor": "wheelhorse",
+            "required_tier": "autonomous"
+        });
+        let check_res = handle_check_autonomy(&args_check).expect("check autonomy succeeds");
+        assert_eq!(check_res["permitted"], true);
+        assert_eq!(check_res["requires_approval"], false);
+
+        // 4. Soma capability check fails autonomous requirement
+        let soma_check = json!({
+            "capability": "soma_production_gate",
+            "actor": "wheelhorse",
+            "required_tier": "autonomous"
+        });
+        let check_res = handle_check_autonomy(&soma_check).expect("soma check succeeds");
+        assert_eq!(check_res["permitted"], false);
+        assert_eq!(check_res["requires_approval"], true);
+
+        // 5. Attempting to promote Soma capability to autonomous must fail closed
+        let soma_promote = json!({
+            "capability": "soma_production_gate",
+            "actor": "wheelhorse",
+            "event_type": "promote",
+            "to_tier": "autonomous",
+            "reason": "illegal autonomous promotion test",
+            "authorized_by": "operator"
+        });
+        let err = handle_record_autonomy_event(&soma_promote)
+            .expect_err("soma autonomous promotion must fail");
+        match err {
+            ToolExecutionError::Client(msg) => {
+                assert!(msg.contains("strictly require human operator verdicts"));
+            }
+            ToolExecutionError::Internal(e) => panic!("expected client error, got Internal({e})"),
         }
     }
 }

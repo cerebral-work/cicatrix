@@ -2059,3 +2059,607 @@ fn unified_error_masking_rest_mcp_and_cli() {
         "CLI stderr must not leak credentials"
     );
 }
+
+#[test]
+fn autonomy_cli_usage_errors() {
+    let out = run(&["autonomy"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: cicatrix autonomy"));
+
+    let out = run(&["autonomy", "unknown_subcmd"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown subcommand `unknown_subcmd`"));
+
+    let out = run(&["autonomy", "status", "--unknown"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown option `--unknown`"));
+
+    let out = run(&["autonomy", "promote"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("missing required --actor"));
+
+    let out = run(&["autonomy", "demote"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("missing required --actor"));
+
+    let out = run(&["autonomy", "check"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("missing required --actor"));
+
+    let out = run(&["autonomy", "history", "--limit", "abc"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--limit requires a positive integer"));
+}
+
+#[test]
+fn autonomy_cli_status_and_defaults() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("autonomy_status.db");
+    let db_str = db_path.to_str().unwrap();
+    let envs = [("CICATRIX_DB_PATH", db_str)];
+
+    // 1. Text list output with seeded capabilities
+    let out = run_with_env(&["autonomy", "status"], &envs);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Autonomy Trust Ladder States"));
+    assert!(stdout.contains("wheelhorse"));
+    assert!(stdout.contains("code_edit"));
+
+    // 2. Query seeded autonomous capability
+    let out_seeded = run_with_env(
+        &[
+            "autonomy",
+            "status",
+            "--actor",
+            "wheelhorse",
+            "--capability",
+            "code_edit",
+        ],
+        &envs,
+    );
+    assert!(out_seeded.status.success());
+    let stdout = String::from_utf8_lossy(&out_seeded.stdout);
+    assert!(stdout.contains("Actor: wheelhorse"));
+    assert!(stdout.contains("Capability: code_edit"));
+    assert!(stdout.contains("Current Tier: autonomous"));
+
+    // 3. Query seeded autonomous capability as JSON
+    let out_json = run_with_env(
+        &[
+            "autonomy",
+            "status",
+            "--actor",
+            "wheelhorse",
+            "--capability",
+            "code_edit",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(out_json.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out_json.stdout).expect("valid json");
+    assert_eq!(v["current_tier"], "autonomous");
+    assert_eq!(v["actor"], "wheelhorse");
+    assert_eq!(v["capability"], "code_edit");
+
+    // 4. Query unrecorded capability defaults to shadow
+    let out_unrec = run_with_env(
+        &[
+            "autonomy",
+            "status",
+            "--actor",
+            "wheelhorse",
+            "--capability",
+            "unrecorded_neural_optimizer",
+        ],
+        &envs,
+    );
+    assert!(out_unrec.status.success());
+    let stdout = String::from_utf8_lossy(&out_unrec.stdout);
+    assert!(stdout.contains("Current Tier: shadow (unrecorded, default)"));
+
+    // 5. Query unrecorded capability JSON
+    let out_unrec_json = run_with_env(
+        &[
+            "autonomy",
+            "status",
+            "--actor",
+            "wheelhorse",
+            "--capability",
+            "unrecorded_neural_optimizer",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(out_unrec_json.status.success());
+    let v_unrec: serde_json::Value =
+        serde_json::from_slice(&out_unrec_json.stdout).expect("valid json");
+    assert_eq!(v_unrec["tier"], "shadow");
+}
+
+#[test]
+fn autonomy_cli_promote_check_demote_history_lifecycle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("autonomy_lifecycle.db");
+    let db_str = db_path.to_str().unwrap();
+    let envs = [("CICATRIX_DB_PATH", db_str)];
+
+    // 1. Check initially fails for supervised requirement when tier is shadow (unrecorded)
+    let out_check1 = run_with_env(
+        &[
+            "autonomy",
+            "check",
+            "--actor",
+            "agent_x",
+            "--capability",
+            "background_ops",
+            "--tier",
+            "supervised",
+        ],
+        &envs,
+    );
+    assert!(!out_check1.status.success());
+    let stderr = String::from_utf8_lossy(&out_check1.stderr);
+    assert!(stderr.contains("DENIED"));
+
+    // 2. Promote to supervised
+    let out_promote1 = run_with_env(
+        &[
+            "autonomy",
+            "promote",
+            "--actor",
+            "agent_x",
+            "--capability",
+            "background_ops",
+            "--to",
+            "supervised",
+            "--reason",
+            "Completed 50 shadow tasks without failure",
+            "--authorized-by",
+            "operator",
+            "--evidence",
+            "{\"tasks_completed\": 50}",
+        ],
+        &envs,
+    );
+    assert!(out_promote1.status.success());
+    let stdout = String::from_utf8_lossy(&out_promote1.stdout);
+    assert!(stdout.contains(
+        "PROMOTED: actor `agent_x` capability `background_ops` from `shadow` to `supervised`"
+    ));
+
+    // 3. Check now passes for supervised
+    let out_check2 = run_with_env(
+        &[
+            "autonomy",
+            "check",
+            "--actor",
+            "agent_x",
+            "--capability",
+            "background_ops",
+            "--tier",
+            "supervised",
+        ],
+        &envs,
+    );
+    assert!(out_check2.status.success());
+    let stdout = String::from_utf8_lossy(&out_check2.stdout);
+    assert!(stdout.contains("GRANTED"));
+
+    // 4. Check fails for autonomous
+    let out_check3 = run_with_env(
+        &[
+            "autonomy",
+            "check",
+            "--actor",
+            "agent_x",
+            "--capability",
+            "background_ops",
+            "--tier",
+            "autonomous",
+        ],
+        &envs,
+    );
+    assert!(!out_check3.status.success());
+
+    // 5. Promote to autonomous with JSON output
+    let out_promote2 = run_with_env(
+        &[
+            "autonomy",
+            "promote",
+            "--actor",
+            "agent_x",
+            "--capability",
+            "background_ops",
+            "--to",
+            "autonomous",
+            "--reason",
+            "Exceeded benchmark thresholds",
+            "--authorized-by",
+            "operator",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(out_promote2.status.success());
+    let v_prom: serde_json::Value =
+        serde_json::from_slice(&out_promote2.stdout).expect("valid json");
+    assert_eq!(v_prom["to_tier"], "autonomous");
+    assert_eq!(v_prom["from_tier"], "supervised");
+
+    // 6. Check now passes for autonomous
+    let out_check4 = run_with_env(
+        &[
+            "autonomy",
+            "check",
+            "--actor",
+            "agent_x",
+            "--capability",
+            "background_ops",
+            "--tier",
+            "autonomous",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(out_check4.status.success());
+    let v_chk: serde_json::Value = serde_json::from_slice(&out_check4.stdout).expect("valid json");
+    assert_eq!(v_chk["permitted"], true);
+    assert_eq!(v_chk["can_execute_autonomously"], true);
+    assert_eq!(v_chk["requires_approval"], false);
+
+    // 7. Demote back to supervised
+    let out_demote = run_with_env(
+        &[
+            "autonomy",
+            "demote",
+            "--actor",
+            "agent_x",
+            "--capability",
+            "background_ops",
+            "--to",
+            "supervised",
+            "--reason",
+            "Incident investigation requested supervisor review",
+            "--authorized-by",
+            "operator",
+        ],
+        &envs,
+    );
+    assert!(out_demote.status.success());
+    let stdout = String::from_utf8_lossy(&out_demote.stdout);
+    assert!(stdout.contains(
+        "DEMOTED: actor `agent_x` capability `background_ops` from `autonomous` to `supervised`"
+    ));
+
+    // 8. History reflects promotions and demotions
+    let out_hist = run_with_env(
+        &[
+            "autonomy",
+            "history",
+            "--actor",
+            "agent_x",
+            "--capability",
+            "background_ops",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(out_hist.status.success());
+    let v_hist: serde_json::Value = serde_json::from_slice(&out_hist.stdout).expect("valid json");
+    let arr = v_hist.as_array().expect("array of history events");
+    assert_eq!(arr.len(), 3);
+    assert_eq!(arr[0]["action_type"], "demote");
+    assert_eq!(arr[1]["action_type"], "promote");
+    assert_eq!(arr[2]["action_type"], "promote");
+}
+
+#[test]
+fn autonomy_cli_soma_production_invariant() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("autonomy_soma.db");
+    let db_str = db_path.to_str().unwrap();
+    let envs = [("CICATRIX_DB_PATH", db_str)];
+
+    // 1. Soma production capability check fails closed for autonomous tier
+    let out_check = run_with_env(
+        &[
+            "autonomy",
+            "check",
+            "--actor",
+            "wheelhorse",
+            "--capability",
+            "soma_production_gate",
+            "--tier",
+            "autonomous",
+        ],
+        &envs,
+    );
+    assert!(!out_check.status.success());
+    let stderr = String::from_utf8_lossy(&out_check.stderr);
+    assert!(stderr.contains("strictly require human operator verdicts"));
+
+    // 2. Promotion of Soma capability to autonomous tier is strictly prohibited and fails closed
+    let out_promote = run_with_env(
+        &[
+            "autonomy",
+            "promote",
+            "--actor",
+            "wheelhorse",
+            "--capability",
+            "soma_production_gate",
+            "--to",
+            "autonomous",
+            "--reason",
+            "Bypass operator gate",
+            "--authorized-by",
+            "operator",
+        ],
+        &envs,
+    );
+    assert!(!out_promote.status.success());
+    let stderr = String::from_utf8_lossy(&out_promote.stderr);
+    assert!(stderr.contains("strictly require human operator verdicts"));
+
+    // 3. Reversibility verification on Soma production diff routes to human approval
+    let soma_diff = r#"diff --git a/crates/soma/src/policy.rs b/crates/soma/src/policy.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/soma/src/policy.rs
+@@ -0,0 +1,5 @@
++// Soma production cluster policy definition
++pub fn enforce_gate() -> bool {
++    true
++}
++"#;
+    let out_rev = run_with_env_and_stdin(
+        &[
+            "reversibility",
+            "eval",
+            "--diff",
+            "-",
+            "--tier",
+            "autonomous",
+            "--json",
+        ],
+        &envs,
+        soma_diff,
+    );
+    assert!(out_rev.status.success());
+    let v_rev: serde_json::Value =
+        serde_json::from_slice(&out_rev.stdout).expect("valid json reversibility report");
+    assert_eq!(v_rev["verdict"]["verdict"], "route_to_approval");
+    assert_eq!(v_rev["verdict"]["signal_name"], "operator_verdict");
+    assert_eq!(v_rev["is_soma_production"], true);
+}
+
+#[test]
+fn autonomy_rest_endpoints_and_error_masking() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("autonomy_rest.db");
+    let db_str = db_path.to_str().unwrap().to_string();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let bind_addr = format!("127.0.0.1:{port}");
+
+    let mut child = Command::new(BIN)
+        .arg("serve")
+        .arg("--mcp")
+        .arg("--bind")
+        .arg(&bind_addr)
+        .env("CICATRIX_DB_PATH", &db_str)
+        .spawn()
+        .expect("failed to spawn cicatrix serve --mcp");
+
+    // Wait until server is reachable
+    let mut connected = false;
+    for _ in 0..50 {
+        if let Ok(mut stream) = TcpStream::connect(&bind_addr) {
+            let req =
+                format!("GET /health HTTP/1.1\r\nHost: {bind_addr}\r\nConnection: close\r\n\r\n");
+            if stream.write_all(req.as_bytes()).is_ok() {
+                let mut res = String::new();
+                if stream.read_to_string(&mut res).is_ok() && res.contains("200 OK") {
+                    connected = true;
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(connected, "HTTP server did not become ready in time");
+
+    // 1. POST /api/v1/autonomy/tier: Retrieve seeded capability tier
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let payload = serde_json::json!({
+            "actor": "wheelhorse",
+            "capability": "code_edit"
+        })
+        .to_string();
+        let req = format!(
+            "POST /api/v1/autonomy/tier HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "Expected 200 OK, got: {res}");
+        assert!(
+            res.contains("\"tier\":\"autonomous\""),
+            "Expected tier autonomous, got: {res}"
+        );
+    }
+
+    // 2. POST /api/v1/autonomy/check: Check autonomy permissions
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let payload = serde_json::json!({
+            "actor": "wheelhorse",
+            "capability": "code_edit",
+            "required_tier": "autonomous"
+        })
+        .to_string();
+        let req = format!(
+            "POST /api/v1/autonomy/check HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "Expected 200 OK, got: {res}");
+        assert!(
+            res.contains("\"permitted\":true"),
+            "Expected permitted true, got: {res}"
+        );
+        assert!(
+            res.contains("\"requires_approval\":false"),
+            "Expected requires_approval false, got: {res}"
+        );
+    }
+
+    // 3. POST /api/v1/autonomy/record: Record promotion event
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let payload = serde_json::json!({
+            "actor": "rest_actor",
+            "capability": "data_indexing",
+            "to_tier": "supervised",
+            "reason": "Promoting to supervised for REST test",
+            "authorized_by": "operator",
+            "event_type": "promote"
+        })
+        .to_string();
+        let req = format!(
+            "POST /api/v1/autonomy/record HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "Expected 200 OK, got: {res}");
+        assert!(
+            res.contains("\"status\":\"recorded\""),
+            "Expected status recorded, got: {res}"
+        );
+    }
+
+    // 4. POST /api/v1/autonomy/history: Query recorded history
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let payload = serde_json::json!({
+            "actor": "rest_actor",
+            "capability": "data_indexing"
+        })
+        .to_string();
+        let req = format!(
+            "POST /api/v1/autonomy/history HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "Expected 200 OK, got: {res}");
+        assert!(
+            res.contains("\"action_type\":\"promote\""),
+            "Expected promote action in history, got: {res}"
+        );
+    }
+
+    // 5. POST /api/v1/autonomy/record: Attempting to promote Soma capability to autonomous fails with 400 Bad Request
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let payload = serde_json::json!({
+            "actor": "rest_actor",
+            "capability": "soma_prod_deploy",
+            "to_tier": "autonomous",
+            "reason": "Attempting illegal autonomous Soma promotion",
+            "authorized_by": "operator",
+            "event_type": "promote"
+        })
+        .to_string();
+        let req = format!(
+            "POST /api/v1/autonomy/record HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(
+            res.contains("400 Bad Request"),
+            "Expected 400 Bad Request, got: {res}"
+        );
+        assert!(
+            res.contains("strictly require human operator verdicts"),
+            "Expected soma invariant error, got: {res}"
+        );
+        // Zero path leaks in masked client error
+        assert!(!res.contains("/home/"), "Leaked path in body: {res}");
+    }
+
+    // 6. POST /api/v1/autonomy/tier with malformed JSON: Assert 400 Bad Request client error
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let bad_payload = "{ not valid json";
+        let req = format!(
+            "POST /api/v1/autonomy/tier HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            bad_payload.len(),
+            bad_payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("400 Bad Request"), "Expected 400, got: {res}");
+        assert!(
+            res.contains("\"error\":\"bad_request\""),
+            "Expected bad_request, got: {res}"
+        );
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}

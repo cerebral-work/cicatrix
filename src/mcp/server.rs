@@ -384,6 +384,24 @@ async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
                     handle_rest_tool_call("cicatrix_check_tripwire", &body, &mut stream).await?;
                     return Ok(());
                 }
+                ("POST", "/api/v1/autonomy/tier") => {
+                    handle_rest_tool_call("cicatrix_get_autonomy_tier", &body, &mut stream).await?;
+                    return Ok(());
+                }
+                ("POST", "/api/v1/autonomy/record") => {
+                    handle_rest_tool_call("cicatrix_record_autonomy_event", &body, &mut stream)
+                        .await?;
+                    return Ok(());
+                }
+                ("POST", "/api/v1/autonomy/history") => {
+                    handle_rest_tool_call("cicatrix_list_autonomy_history", &body, &mut stream)
+                        .await?;
+                    return Ok(());
+                }
+                ("POST", "/api/v1/autonomy/check") => {
+                    handle_rest_tool_call("cicatrix_check_autonomy", &body, &mut stream).await?;
+                    return Ok(());
+                }
                 ("GET", "/api/v1/error/simulate_500") | ("POST", "/api/v1/error/simulate_500") => {
                     let masked = crate::masking::MaskedError::internal(
                         "simulated internal database error at /home/ctodie/db.sqlite with token=secret123"

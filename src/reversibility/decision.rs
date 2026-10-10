@@ -4,50 +4,11 @@
 //! returns `AutoCommit`, `AutoCommitWithNotice`, `RouteToApproval`, or `Block`
 //! based on action classification, speculative validation results, and autonomy tier.
 
-use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::str::FromStr;
-
 use super::classify::ActionClass;
 use super::validate::ValidationResult;
+use serde::{Deserialize, Serialize};
 
-/// Autonomy capability levels under the earned autonomy trust ladder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutonomyTier {
-    /// Shadow mode: executes actions in dry-run / speculative sandbox only.
-    Shadow,
-    /// Supervised mode: human approval required for one-way doors; notice for reversible changes.
-    #[default]
-    Supervised,
-    /// Autonomous mode: auto-commits pure additions; captures rollback notices for modifications.
-    Autonomous,
-}
-
-impl FromStr for AutonomyTier {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_lowercase().as_str() {
-            "shadow" => Ok(Self::Shadow),
-            "supervised" => Ok(Self::Supervised),
-            "autonomous" => Ok(Self::Autonomous),
-            other => Err(format!(
-                "invalid autonomy tier `{other}`; expected: shadow, supervised, or autonomous"
-            )),
-        }
-    }
-}
-
-impl fmt::Display for AutonomyTier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Shadow => write!(f, "shadow"),
-            Self::Supervised => write!(f, "supervised"),
-            Self::Autonomous => write!(f, "autonomous"),
-        }
-    }
-}
+pub use crate::autonomy::AutonomyTier;
 
 /// Final gate verdict returned by the reversibility pipeline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,11 +34,30 @@ pub fn evaluate_verdict(
     tier: AutonomyTier,
     canary_touched: bool,
 ) -> ReversibilityVerdict {
+    evaluate_verdict_with_soma(action_class, validation, tier, canary_touched, false)
+}
+
+/// Evaluate final reversibility verdict, enforcing canary tripwires and the Soma invariant.
+pub fn evaluate_verdict_with_soma(
+    action_class: &ActionClass,
+    validation: &ValidationResult,
+    tier: AutonomyTier,
+    canary_touched: bool,
+    soma_production_touched: bool,
+) -> ReversibilityVerdict {
     // Tripwire canary sentinels fail closed immediately
     if canary_touched {
         return ReversibilityVerdict::Block {
             violation: "Tripwire canary touched: unauthorized mutation to regression sentinel"
                 .to_string(),
+        };
+    }
+
+    // Estate Invariant: Soma production gates strictly require human operator verdicts
+    if soma_production_touched {
+        return ReversibilityVerdict::RouteToApproval {
+            signal_name: "operator_verdict".to_string(),
+            timeout_seconds: 3600,
         };
     }
 
@@ -199,5 +179,25 @@ mod tests {
             verdict,
             ReversibilityVerdict::AutoCommitWithNotice { .. }
         ));
+    }
+
+    #[test]
+    fn test_soma_production_routes_to_approval() {
+        // Even for an additive change and Autonomous tier, touching Soma production
+        // MUST strictly route to operator approval.
+        let action = ActionClass::ReversibleAdditive;
+        let val = ValidationResult::Valid {
+            baseline_restored: true,
+            side_effects_count: 0,
+            audit_receipt: "ok".into(),
+        };
+        let verdict =
+            evaluate_verdict_with_soma(&action, &val, AutonomyTier::Autonomous, false, true);
+        match verdict {
+            ReversibilityVerdict::RouteToApproval { signal_name, .. } => {
+                assert_eq!(signal_name, "operator_verdict");
+            }
+            other => panic!("expected RouteToApproval for Soma production gate, got {other:?}"),
+        }
     }
 }

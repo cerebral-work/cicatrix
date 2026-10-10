@@ -219,10 +219,13 @@ flowchart LR
 ### Phase 4: Earned Autonomy Trust Ladder & Estate Integration (v1.0)
 **Goal:** Connect Cicatrix as an estate-wide provider across Cortex, Soma, and cluster nodes.
 
-* [ ] **Milestone 4.1: Earned Autonomy Trust Ladder**
-  * Implement three capability levels: `shadow`, `supervised`, and `autonomous`.
-  * Maintain an append-only audit ledger of capability promotion events.
-  * Enforce the estate invariant: Soma gates default strictly to human operator verdicts; earned autonomy applies only to background operational tasks and speculative sandboxes.
+* [x] **Milestone 4.1: Earned Autonomy Trust Ladder (`CER-2762`)**
+  * Implemented 3-tier capability trust ladder (`Shadow`, `Supervised`, `Autonomous`) with default capability seeds in `src/autonomy/`.
+  * Added append-only audit ledger (`autonomy_ledger`) and state view (`autonomy_state`) in SQLite storage (`migrations/0003_autonomy_ledger.sql`) enforcing `:db/neverZeroValue` schema integrity and SQL triggers forbidding `UPDATE` and `DELETE`.
+  * Strictly enforced estate Soma invariant: Soma production capabilities and diff paths require human operator verdicts (`RouteToApproval`), autonomous execution is rejected, and illegal promotion attempts fail closed.
+  * Added CLI command `cicatrix autonomy <status|promote|demote|history|check>` with `--json` support.
+  * Exposed 4 MCP tools (`cicatrix_get_autonomy_tier`, `cicatrix_record_autonomy_event`, `cicatrix_list_autonomy_history`, `cicatrix_check_autonomy`).
+  * Connected REST HTTP endpoints (`/api/v1/autonomy/{tier,record,history,check}`) with unified correlation error masking.
 * [ ] **Milestone 4.2: Soma Run-Context Assembly Integration (CER-2611)**
   * Wire Cicatrix MCP query directly into Soma run context assembly (`blackwall-cli/src/run.rs`).
   * Prepend `<known-bugs>` guidance to task prompts automatically before execution begins.

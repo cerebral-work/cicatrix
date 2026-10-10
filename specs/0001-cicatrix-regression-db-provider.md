@@ -77,8 +77,8 @@ SQLite   Postgres
 - [x] 5. Implement Phase 2 Autumn Harvest deterministic event-sourced workflow runtime.
 - [x] 6. Implement Phase 2 durable signal delivery with idempotency deduplication.
 - [x] 7. Implement Phase 2 native Model Context Protocol (MCP) provider interface.
-- [ ] 8. Implement Phase 3 Wheelhorse reversibility gate and canary tripwire defenses.
-- [ ] 9. Implement Phase 3 earned autonomy trust ladder transitions.
+- [x] 8. Implement Phase 3 Wheelhorse reversibility gate and canary tripwire defenses.
+- [x] 9. Implement Phase 4 earned autonomy trust ladder transitions.
 - [ ] 10. Implement Phase 4 central PostgreSQL storage backend.
 
 ## Verification

@@ -37,6 +37,9 @@ pub struct ClassificationReport {
     pub is_file_deletion: bool,
     /// Whether the mutation is pure addition without deletions.
     pub is_pure_addition: bool,
+    /// Whether any touched files touch Soma production deployment gates or surfaces.
+    #[serde(default)]
+    pub is_soma_production: bool,
     /// Human-readable reasons explaining the classification.
     pub reasons: Vec<String>,
 }
@@ -340,6 +343,16 @@ pub fn classify_diff(diff: &str) -> Result<ClassificationReport, String> {
 
     let touched_files: Vec<String> = touched_files_set.into_iter().collect();
 
+    let mut is_soma_production = false;
+    for file_path in &touched_files {
+        if crate::autonomy::is_soma_production_path(file_path) {
+            is_soma_production = true;
+            reasons.push(format!(
+                "touches Soma production deployment surface `{file_path}`"
+            ));
+        }
+    }
+
     let action_class = if is_file_deletion || is_migration || is_secret_rotation {
         ActionClass::OneWayDoor {
             reason: reasons.join("; "),
@@ -363,6 +376,7 @@ pub fn classify_diff(diff: &str) -> Result<ClassificationReport, String> {
         is_secret_rotation,
         is_file_deletion,
         is_pure_addition,
+        is_soma_production,
         reasons,
     })
 }
@@ -556,5 +570,21 @@ index 6666666..7777777 100644
 "#;
         let report = classify_diff(diff).expect("classification should succeed");
         assert!(report.canary_touched);
+    }
+
+    #[test]
+    fn test_classify_soma_production_surface() {
+        let diff = r#"
+diff --git a/.soma/deploy.yaml b/.soma/deploy.yaml
+new file mode 100644
+index 0000000..8888888
+--- /dev/null
++++ b/.soma/deploy.yaml
+@@ -0,0 +1,5 @@
++version: 1
++cluster: prod
++"#;
+        let report = classify_diff(diff).expect("classification should succeed");
+        assert!(report.is_soma_production);
     }
 }

@@ -18,7 +18,9 @@ pub use classify::{
     classify_diff, is_migration_path, is_secret_path, parse_diff_files, ActionClass,
     ClassificationReport, DiffFile, DiffHunk, DiffLine,
 };
-pub use decision::{evaluate_verdict, AutonomyTier, ReversibilityVerdict};
+pub use decision::{
+    evaluate_verdict, evaluate_verdict_with_soma, AutonomyTier, ReversibilityVerdict,
+};
 pub use plan::{
     capture_plan, invert_diff_file, invert_hunk, validate_compensation_plan, CompensationOp,
     CompensationPlan,
@@ -45,6 +47,9 @@ pub struct ReversibilityReport {
     pub touched_files: Vec<String>,
     /// Whether any synthetic canary tripwires were touched.
     pub canary_touched: bool,
+    /// Whether any Soma production gates or surfaces were touched.
+    #[serde(default)]
+    pub is_soma_production: bool,
     /// Active autonomy capability tier.
     pub tier: AutonomyTier,
     /// Human-readable evaluation summary.
@@ -86,11 +91,12 @@ impl ReversibilityPipeline {
         let classification = self.classify(diff)?;
         let plan = capture_plan(diff, &classification)?;
         let validation = validate_sandbox(diff, &classification, &plan)?;
-        let verdict = evaluate_verdict(
+        let verdict = evaluate_verdict_with_soma(
             &classification.action_class,
             &validation,
             self.tier,
             classification.canary_touched,
+            classification.is_soma_production,
         );
 
         let summary = match &verdict {
@@ -101,9 +107,11 @@ impl ReversibilityPipeline {
                 format!("Change verified reversible with rollback plan: {notice}")
             }
             ReversibilityVerdict::RouteToApproval { signal_name, .. } => {
-                format!(
-                    "Change is a OneWayDoor mutation; requires human approval via `{signal_name}`."
-                )
+                if classification.is_soma_production {
+                    format!("Change touches Soma production surface; requires human operator verdict via `{signal_name}` per estate invariant.")
+                } else {
+                    format!("Change is a OneWayDoor mutation; requires human approval via `{signal_name}`.")
+                }
             }
             ReversibilityVerdict::Block { violation } => {
                 format!("Change rejected by reversibility gate: {violation}")
@@ -117,6 +125,7 @@ impl ReversibilityPipeline {
             verdict,
             touched_files: classification.touched_files,
             canary_touched: classification.canary_touched,
+            is_soma_production: classification.is_soma_production,
             tier: self.tier,
             summary,
         })
@@ -179,5 +188,28 @@ index 0000000..3333333
             report.verdict,
             ReversibilityVerdict::RouteToApproval { .. }
         ));
+    }
+
+    #[test]
+    fn test_pipeline_end_to_end_soma_routes_to_approval() {
+        let diff = r#"
+diff --git a/crates/soma/src/policy.rs b/crates/soma/src/policy.rs
+new file mode 100644
+index 0000000..4444444
+--- /dev/null
++++ b/crates/soma/src/policy.rs
+@@ -0,0 +1,2 @@
++// Soma production rule
++pub const STRICT: bool = true;
+"#;
+        let pipeline = ReversibilityPipeline::new(AutonomyTier::Autonomous);
+        let report = pipeline.evaluate(diff).unwrap();
+
+        assert!(report.is_soma_production);
+        assert!(matches!(
+            report.verdict,
+            ReversibilityVerdict::RouteToApproval { .. }
+        ));
+        assert!(report.summary.contains("Soma production surface"));
     }
 }

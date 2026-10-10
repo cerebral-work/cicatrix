@@ -3,7 +3,7 @@
 //! Enforces safety bounds on event log length (50,000 events) and serialized size (50 MiB),
 //! exposes execution APIs, and provides lock-free read-only database inspection.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use autumn_harvest_sqlite::{RunState, SqliteError, SqliteRuntime};
 use rusqlite::Connection;
@@ -14,10 +14,12 @@ use crate::workflow::audit::{
     aggregate_drift_report_info, audit_workflow_info, run_aggregate_drift_report,
     run_scan_repo_markers, scan_repo_markers_info,
 };
+use crate::workflow::signal::{DurableSignal, SignalDeliveryStatus, StoredSignalRecord};
 use crate::workflow::triage::{
     bisect_commits_info, ingest_test_failure_info, isolate_minimal_reproducer_info,
-    run_bisect_commits, run_ingest_test_failure, run_isolate_minimal_reproducer,
-    triage_workflow_info, BisectCommitsInput, ReproducerInput, TriageInput,
+    review_gate_workflow_info, run_bisect_commits, run_ingest_test_failure,
+    run_isolate_minimal_reproducer, triage_workflow_info, BisectCommitsInput, ReproducerInput,
+    TriageInput,
 };
 use crate::workflow::{MAX_WORKFLOW_BYTES, MAX_WORKFLOW_EVENTS};
 
@@ -130,6 +132,37 @@ pub struct WorkflowExecutionSummary {
     pub byte_size: usize,
 }
 
+/// Outcome of delivering a durable signal to an execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignalDeliveryReport {
+    /// Workflow execution identifier.
+    pub exec_id: String,
+    /// Canonical signal name.
+    pub signal_name: String,
+    /// Unique idempotency key.
+    pub idempotency_key: String,
+    /// Status: delivered or duplicate.
+    pub status: SignalDeliveryStatus,
+    /// Current workflow execution state following signal delivery attempt.
+    pub run_state: String,
+}
+
+/// Initialize the durable signal ledger table in SQLite.
+pub fn init_signal_ledger_table(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workflow_signal_ledger (
+            exec_id TEXT NOT NULL,
+            signal_name TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            received_at INTEGER NOT NULL,
+            PRIMARY KEY (exec_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_signal_ledger_exec ON workflow_signal_ledger (exec_id);",
+    )?;
+    Ok(())
+}
+
 /// Detailed inspection view of a workflow execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowExecutionDetail {
@@ -153,6 +186,8 @@ pub struct WorkflowExecutionDetail {
     pub byte_size: usize,
     /// List of raw event JSON payloads.
     pub events: Vec<serde_json::Value>,
+    /// List of durable signals received by this execution.
+    pub signals: Vec<StoredSignalRecord>,
 }
 
 /// Execution outcome report returned by `WorkflowEngine::run_workflow`.
@@ -177,13 +212,22 @@ pub struct WorkflowExecutionReport<T> {
 /// Durable workflow engine wrapping embedded `autumn-harvest-sqlite`.
 pub struct WorkflowEngine {
     runtime: SqliteRuntime,
+    ledger_conn: Connection,
+    db_path: Option<PathBuf>,
 }
 
 impl WorkflowEngine {
     /// Open the workflow database at the given path and register default workflows.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, WorkflowEngineError> {
-        let runtime = SqliteRuntime::open(path)?;
-        let mut engine = Self { runtime };
+        let runtime = SqliteRuntime::open(path.as_ref())?;
+        let ledger_conn = Connection::open(path.as_ref())?;
+        ledger_conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        init_signal_ledger_table(&ledger_conn)?;
+        let mut engine = Self {
+            runtime,
+            ledger_conn,
+            db_path: Some(path.as_ref().to_path_buf()),
+        };
         engine.register_defaults();
         Ok(engine)
     }
@@ -191,7 +235,13 @@ impl WorkflowEngine {
     /// Open an isolated in-memory workflow database (primarily for testing).
     pub fn open_in_memory() -> Result<Self, WorkflowEngineError> {
         let runtime = SqliteRuntime::open_in_memory()?;
-        let mut engine = Self { runtime };
+        let ledger_conn = Connection::open_in_memory()?;
+        init_signal_ledger_table(&ledger_conn)?;
+        let mut engine = Self {
+            runtime,
+            ledger_conn,
+            db_path: None,
+        };
         engine.register_defaults();
         Ok(engine)
     }
@@ -200,6 +250,7 @@ impl WorkflowEngine {
     fn register_defaults(&mut self) {
         self.runtime.register_workflow(&triage_workflow_info());
         self.runtime.register_workflow(&audit_workflow_info());
+        self.runtime.register_workflow(&review_gate_workflow_info());
 
         self.runtime
             .register_activity(&ingest_test_failure_info(), |val| {
@@ -305,6 +356,22 @@ impl WorkflowEngine {
                 output: None,
                 error: Some(err),
             }),
+            RunState::WaitingSignal(sig) => {
+                let state_str = format!("WAITING_SIGNAL({sig})");
+                let _ = self.ledger_conn.execute(
+                    "UPDATE harvest_executions SET state = ? WHERE exec_id = ?",
+                    [&state_str, &exec_id.to_string()],
+                );
+                Ok(WorkflowExecutionReport {
+                    exec_id: exec_id.to_string(),
+                    workflow_name: workflow_name.to_string(),
+                    state: state_str,
+                    event_count,
+                    byte_size,
+                    output: None,
+                    error: None,
+                })
+            }
             other => Ok(WorkflowExecutionReport {
                 exec_id: exec_id.to_string(),
                 workflow_name: workflow_name.to_string(),
@@ -315,6 +382,148 @@ impl WorkflowEngine {
                 error: None,
             }),
         }
+    }
+
+    /// Deliver a durable signal to a running or parked workflow execution.
+    ///
+    /// Deduplicates deliveries on `(exec_id, idempotency_key)` using the SQLite signal ledger.
+    /// If duplicate, returns `SignalDeliveryStatus::Duplicate` with current run state without advancing.
+    /// If fresh, persists to ledger, delivers to `autumn-harvest-sqlite` runtime, and advances execution.
+    pub async fn deliver_signal<T: Serialize + Sync>(
+        &mut self,
+        exec_id: &str,
+        signal: &DurableSignal<T>,
+    ) -> Result<SignalDeliveryReport, WorkflowEngineError> {
+        signal
+            .validate()
+            .map_err(WorkflowEngineError::ExecutionFailed)?;
+
+        let exec_uuid = exec_id
+            .parse::<autumn_harvest::ExecutionId>()
+            .map_err(|e| {
+                WorkflowEngineError::ExecutionFailed(format!("invalid execution ID: {e}"))
+            })?;
+
+        // Check if (exec_id, idempotency_key) already recorded in ledger
+        let is_duplicate: bool = self
+            .ledger_conn
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_signal_ledger WHERE exec_id = ? AND idempotency_key = ?",
+                [exec_id, &signal.idempotency_key],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .map_err(WorkflowEngineError::Rusqlite)?;
+
+        if is_duplicate {
+            let current_state = self.get_current_execution_state(exec_id)?;
+            return Ok(SignalDeliveryReport {
+                exec_id: exec_id.to_string(),
+                signal_name: signal.signal_name.clone(),
+                idempotency_key: signal.idempotency_key.clone(),
+                status: SignalDeliveryStatus::Duplicate,
+                run_state: current_state,
+            });
+        }
+
+        let payload_json =
+            serde_json::to_string(&signal.payload).map_err(WorkflowEngineError::Serialization)?;
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        self.ledger_conn
+            .execute(
+                "INSERT INTO workflow_signal_ledger (exec_id, signal_name, idempotency_key, payload_json, received_at) \
+                 VALUES (?, ?, ?, ?, ?)",
+                rusqlite::params![exec_id, &signal.signal_name, &signal.idempotency_key, &payload_json, now_millis],
+            )
+            .map_err(WorkflowEngineError::Rusqlite)?;
+
+        let payload_value =
+            serde_json::to_value(&signal.payload).map_err(WorkflowEngineError::Serialization)?;
+
+        self.runtime
+            .send_signal(exec_uuid, &signal.signal_name, payload_value)
+            .map_err(WorkflowEngineError::Sqlite)?;
+
+        let new_run_state = self.runtime.run_until_blocked(exec_uuid).await?;
+        let state_str = match new_run_state {
+            RunState::Completed(_) => "COMPLETED".to_string(),
+            RunState::Failed(e) => format!("FAILED({e})"),
+            RunState::WaitingSignal(s) => {
+                let sig_state = format!("WAITING_SIGNAL({s})");
+                let _ = self.ledger_conn.execute(
+                    "UPDATE harvest_executions SET state = ? WHERE exec_id = ?",
+                    [&sig_state, exec_id],
+                );
+                sig_state
+            }
+            RunState::InProgress => "IN_PROGRESS".to_string(),
+            RunState::WaitingTimer => "WAITING_TIMER".to_string(),
+        };
+
+        Ok(SignalDeliveryReport {
+            exec_id: exec_id.to_string(),
+            signal_name: signal.signal_name.clone(),
+            idempotency_key: signal.idempotency_key.clone(),
+            status: SignalDeliveryStatus::Delivered,
+            run_state: state_str,
+        })
+    }
+
+    /// Determine the current state of an execution.
+    fn get_current_execution_state(&self, exec_id: &str) -> Result<String, WorkflowEngineError> {
+        if self.db_path.is_some() {
+            let state: Result<String, rusqlite::Error> = self.ledger_conn.query_row(
+                "SELECT state FROM harvest_executions WHERE exec_id = ?",
+                [exec_id],
+                |r| r.get(0),
+            );
+            if let Ok(st) = state {
+                return Ok(st);
+            }
+        }
+        let exec_uuid = exec_id
+            .parse::<autumn_harvest::ExecutionId>()
+            .map_err(|e| {
+                WorkflowEngineError::ExecutionFailed(format!("invalid execution ID: {e}"))
+            })?;
+        match self.runtime.outcome(exec_uuid) {
+            Ok(autumn_harvest_sqlite::ExecutionOutcome::Completed(_)) => {
+                Ok("COMPLETED".to_string())
+            }
+            Ok(autumn_harvest_sqlite::ExecutionOutcome::Failed(e)) => Ok(format!("FAILED({e})")),
+            Ok(autumn_harvest_sqlite::ExecutionOutcome::Terminated(s)) => Ok(s),
+            Ok(autumn_harvest_sqlite::ExecutionOutcome::Running) => Ok("RUNNING".to_string()),
+            Err(e) => Err(WorkflowEngineError::Sqlite(e)),
+        }
+    }
+
+    /// List all durable signals received for a given execution from the signal ledger.
+    pub fn list_signals_for_execution(
+        &self,
+        exec_id: &str,
+    ) -> Result<Vec<StoredSignalRecord>, WorkflowEngineError> {
+        let mut sig_stmt = self.ledger_conn.prepare(
+            "SELECT exec_id, signal_name, idempotency_key, payload_json, received_at \
+             FROM workflow_signal_ledger WHERE exec_id = ? ORDER BY rowid ASC",
+        )?;
+        let sig_rows = sig_stmt.query_map([exec_id], |r| {
+            Ok(StoredSignalRecord {
+                exec_id: r.get(0)?,
+                signal_name: r.get(1)?,
+                idempotency_key: r.get(2)?,
+                payload_json: r.get(3)?,
+                received_at: r.get(4)?,
+            })
+        })?;
+        let mut signals = Vec::new();
+        for sig in sig_rows {
+            signals.push(sig?);
+        }
+        Ok(signals)
     }
 }
 
@@ -420,6 +629,35 @@ pub fn get_execution_detail_from_db(
     }
     let event_count = events.len();
 
+    let signal_table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workflow_signal_ledger'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    let mut signals = Vec::new();
+    if signal_table_exists {
+        let mut sig_stmt = conn.prepare(
+            "SELECT exec_id, signal_name, idempotency_key, payload_json, received_at \
+             FROM workflow_signal_ledger WHERE exec_id = ? ORDER BY rowid ASC",
+        )?;
+        let sig_rows = sig_stmt.query_map([exec_id], |r| {
+            Ok(StoredSignalRecord {
+                exec_id: r.get(0)?,
+                signal_name: r.get(1)?,
+                idempotency_key: r.get(2)?,
+                payload_json: r.get(3)?,
+                received_at: r.get(4)?,
+            })
+        })?;
+        for sig in sig_rows {
+            signals.push(sig?);
+        }
+    }
+
     Ok(WorkflowExecutionDetail {
         exec_id: exec_id_str,
         workflow_name,
@@ -431,6 +669,7 @@ pub fn get_execution_detail_from_db(
         event_count,
         byte_size,
         events,
+        signals,
     })
 }
 
@@ -439,6 +678,7 @@ mod tests {
     use super::*;
     use crate::workflow::audit::AuditReport;
     use crate::workflow::triage::TriageReport;
+    use crate::workflow::{OperatorDecision, OperatorVerdict, ReviewGateInput, ReviewGateReport};
 
     #[tokio::test]
     async fn test_engine_run_triage_workflow_in_memory() {
@@ -450,6 +690,7 @@ mod tests {
             failure_log: "assertion failed: `(left == right)`\n --> src/store/sqlite.rs:100:1"
                 .to_string(),
             reproducer_file: None,
+            require_operator_review: false,
         };
 
         let report: WorkflowExecutionReport<TriageReport> = engine
@@ -530,6 +771,7 @@ mod tests {
                 candidate_commits: vec!["commit_x".to_string()],
                 failure_log: "panicked at 'boom'\n --> src/main.rs:10:1".to_string(),
                 reproducer_file: None,
+                require_operator_review: false,
             };
 
             let report: WorkflowExecutionReport<TriageReport> = engine
@@ -561,5 +803,107 @@ mod tests {
             Err(WorkflowEngineError::NotFound(id)) => assert_eq!(id, "missing_exec_id"),
             other => panic!("expected NotFound, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_review_gate_parking_and_signal_delivery() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("review_gate.db");
+
+        let mut engine = WorkflowEngine::open(&db_path).expect("open on-disk engine");
+
+        let input = ReviewGateInput {
+            target_ref: "refs/heads/main".to_string(),
+            description: Some("Deploy approval gate".to_string()),
+            requested_by: Some("alice".to_string()),
+        };
+
+        let report: WorkflowExecutionReport<ReviewGateReport> = engine
+            .run_workflow("review_gate_workflow", input)
+            .await
+            .expect("run review gate workflow");
+
+        assert_eq!(report.state, "WAITING_SIGNAL(operator_verdict)");
+        assert!(report.output.is_none());
+        let exec_id = report.exec_id;
+
+        // Verify read-only status shows WAITING_SIGNAL
+        let detail = get_execution_detail_from_db(&db_path, &exec_id).expect("get detail");
+        assert_eq!(detail.state, "WAITING_SIGNAL(operator_verdict)");
+        assert!(detail.signals.is_empty());
+
+        // Deliver approved verdict
+        let verdict = OperatorVerdict::new(
+            OperatorDecision::Approved,
+            "ctodie".to_string(),
+            Some("Production deploy ratified".to_string()),
+        )
+        .expect("valid verdict");
+
+        let signal = DurableSignal::new(
+            "operator_verdict",
+            "idem-key-prod-001".to_string(),
+            verdict.clone(),
+        )
+        .expect("valid signal");
+
+        let delivery = engine
+            .deliver_signal(&exec_id, &signal)
+            .await
+            .expect("deliver signal");
+
+        assert_eq!(delivery.status, SignalDeliveryStatus::Delivered);
+        assert_eq!(delivery.run_state, "COMPLETED");
+
+        // Verify history and detail updated
+        let updated_detail =
+            get_execution_detail_from_db(&db_path, &exec_id).expect("get updated detail");
+        assert_eq!(updated_detail.state, "COMPLETED");
+        assert_eq!(updated_detail.signals.len(), 1);
+        assert_eq!(
+            updated_detail.signals[0].idempotency_key,
+            "idem-key-prod-001"
+        );
+
+        // Attempt duplicate delivery with identical idempotency key
+        let dup_delivery = engine
+            .deliver_signal(&exec_id, &signal)
+            .await
+            .expect("duplicate delivery");
+
+        assert_eq!(dup_delivery.status, SignalDeliveryStatus::Duplicate);
+        assert_eq!(dup_delivery.run_state, "COMPLETED");
+
+        // Verify signal count did not increase
+        let ledger_signals = engine
+            .list_signals_for_execution(&exec_id)
+            .expect("list signals");
+        assert_eq!(ledger_signals.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_signal_validation_failure() {
+        let mut engine = WorkflowEngine::open_in_memory().expect("in-memory engine");
+
+        // Empty operator fails schema validation (:db/neverZeroValue)
+        let invalid_verdict = OperatorVerdict {
+            decision: OperatorDecision::Approved,
+            operator: "  ".to_string(),
+            comments: Some("approved".to_string()),
+            timestamp: "2026-10-10T00:00:00Z".to_string(),
+        };
+        assert!(invalid_verdict.validate().is_err());
+
+        // Empty signal name fails schema validation (:db/neverZeroValue)
+        let signal = DurableSignal {
+            signal_name: "   ".to_string(),
+            idempotency_key: "idem-err-1".to_string(),
+            payload: invalid_verdict,
+        };
+
+        let err = engine.deliver_signal("nonexistent-exec-id", &signal).await;
+        assert!(err.is_err());
+        let err_msg = err.err().unwrap().to_string();
+        assert!(err_msg.contains(":db/neverZeroValue"));
     }
 }

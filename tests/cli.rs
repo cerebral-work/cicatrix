@@ -912,6 +912,16 @@ fn workflow_usage_errors() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("usage: cicatrix workflow status"));
+
+    let out = run(&["workflow", "run", "review-gate"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: cicatrix workflow run review-gate"));
+
+    let out = run(&["workflow", "signal"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: cicatrix workflow signal"));
 }
 
 #[test]
@@ -990,4 +1000,176 @@ fn workflow_run_triage_audit_list_status_cli() {
     assert!(stdout.contains("Workflow:      triage_workflow"));
     assert!(stdout.contains("State:         COMPLETED"));
     assert!(stdout.contains("Event Log"));
+}
+
+#[test]
+fn workflow_review_gate_parking_and_signal_delivery_cli() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let db_path = temp_dir.path().join("cli_review_gate.db");
+    let db_str = db_path.display().to_string();
+
+    // 1. Run review-gate workflow -> should park on WAITING_SIGNAL(operator_verdict)
+    let out = run(&[
+        "workflow",
+        "run",
+        "review-gate",
+        "refs/heads/feature-auth",
+        "--description",
+        "Authentication gate review",
+        "--requested-by",
+        "alice",
+        "--db",
+        &db_str,
+    ]);
+    assert!(
+        out.status.success(),
+        "review-gate run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Workflow execution:"));
+    assert!(stdout.contains("State: WAITING_SIGNAL(operator_verdict)"));
+
+    let exec_id_line = stdout
+        .lines()
+        .find(|l| l.starts_with("Workflow execution:"))
+        .expect("exec id line");
+    let exec_id = exec_id_line
+        .strip_prefix("Workflow execution:")
+        .unwrap()
+        .trim();
+
+    // 2. Status before signal delivery -> shows WAITING_SIGNAL, no signals
+    let out = run(&["workflow", "status", exec_id, "--db", &db_str]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("State:         WAITING_SIGNAL(operator_verdict)"));
+    assert!(!stdout.contains("Durable Signals"));
+
+    // 3. Deliver approved signal -> status DELIVERED, new run state COMPLETED
+    let out = run(&[
+        "workflow",
+        "signal",
+        exec_id,
+        "approved",
+        "--idempotency-key",
+        "gate-key-001",
+        "--operator",
+        "ctodie",
+        "--comments",
+        "Signed off by security operator",
+        "--db",
+        &db_str,
+    ]);
+    assert!(
+        out.status.success(),
+        "signal delivery failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Status:          DELIVERED"));
+    assert!(stdout.contains("Run State:       COMPLETED"));
+    assert!(stdout.contains("Idempotency Key: gate-key-001"));
+
+    // 4. Deliver duplicate signal -> status DUPLICATE, run state COMPLETED
+    let out = run(&[
+        "workflow",
+        "signal",
+        exec_id,
+        "approved",
+        "--idempotency-key",
+        "gate-key-001",
+        "--operator",
+        "ctodie",
+        "--comments",
+        "Duplicate call",
+        "--db",
+        &db_str,
+    ]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Status:          DUPLICATE"));
+    assert!(stdout.contains("Run State:       COMPLETED"));
+
+    // 5. Status after delivery -> shows COMPLETED and Durable Signals table
+    let out = run(&["workflow", "status", exec_id, "--db", &db_str]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("State:         COMPLETED"));
+    assert!(stdout.contains("Durable Signals (1 total):"));
+    assert!(stdout.contains("signal=operator_verdict"));
+    assert!(stdout.contains("key=gate-key-001"));
+    assert!(stdout.contains("ctodie"));
+    assert!(stdout.contains("Signed off by security operator"));
+}
+
+#[test]
+fn workflow_triage_require_review_cli() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let db_path = temp_dir.path().join("cli_triage_review.db");
+    let db_str = db_path.display().to_string();
+
+    // 1. Run triage with --require-review -> parks on WAITING_SIGNAL(operator_verdict)
+    let out = run(&[
+        "workflow",
+        "run",
+        "triage",
+        "tests::test_triage_gate",
+        "--repo",
+        "cicatrix",
+        "--candidate",
+        "sha_x",
+        "--candidate",
+        "sha_y",
+        "--failure-log",
+        "assertion failure at test_triage_gate",
+        "--require-review",
+        "--db",
+        &db_str,
+    ]);
+    assert!(
+        out.status.success(),
+        "triage run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("State: WAITING_SIGNAL(operator_verdict)"));
+
+    let exec_id_line = stdout
+        .lines()
+        .find(|l| l.starts_with("Workflow execution:"))
+        .expect("exec id line");
+    let exec_id = exec_id_line
+        .strip_prefix("Workflow execution:")
+        .unwrap()
+        .trim();
+
+    // 2. Deliver rejected verdict
+    let out = run(&[
+        "workflow",
+        "signal",
+        exec_id,
+        "rejected",
+        "--idempotency-key",
+        "triage-reject-001",
+        "--operator",
+        "ctodie",
+        "--comments",
+        "Culprit rejected pending investigation",
+        "--db",
+        &db_str,
+    ]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Status:          DELIVERED"));
+    assert!(stdout.contains("Run State:       COMPLETED"));
+
+    // 3. Status confirms COMPLETED and signal details
+    let out = run(&["workflow", "status", exec_id, "--db", &db_str]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("State:         COMPLETED"));
+    assert!(stdout.contains("Durable Signals (1 total):"));
+    assert!(stdout.contains("rejected"));
+    assert!(stdout.contains("Culprit rejected pending investigation"));
 }

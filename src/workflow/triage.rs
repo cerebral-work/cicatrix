@@ -31,6 +31,9 @@ pub struct TriageInput {
     /// Path to reproducer test file if known.
     #[serde(default)]
     pub reproducer_file: Option<String>,
+    /// Require human operator review signal before completing workflow.
+    #[serde(default)]
+    pub require_operator_review: bool,
 }
 
 /// Normalized failure representation extracted from test logs.
@@ -101,6 +104,9 @@ pub struct TriageReport {
     pub bisection: BisectionResult,
     /// Candidate bug fact with validated schema integrity.
     pub candidate_bug_fact: Option<BugFact>,
+    /// Optional operator verdict if review was required.
+    #[serde(default)]
+    pub operator_verdict: Option<crate::workflow::signal::OperatorVerdict>,
     /// Terminal workflow execution status.
     pub status: String,
 }
@@ -320,12 +326,96 @@ pub async fn triage_workflow(
         .await
         .map_err(|e| e.to_string())?;
 
+    let mut operator_verdict = None;
+    let mut status = "COMPLETED".to_string();
+
+    if input.require_operator_review {
+        let raw_signal = ctx
+            .wait_for_signal("operator_verdict")
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let verdict: crate::workflow::signal::OperatorVerdict = serde_json::from_value(raw_signal)
+            .map_err(|e| format!("failed to parse OperatorVerdict payload: {e}"))?;
+
+        verdict
+            .validate()
+            .map_err(|e| format!(":db/neverZeroValue validation failure: {e}"))?;
+
+        status = match verdict.decision {
+            crate::workflow::signal::OperatorDecision::Approved => "APPROVED".to_string(),
+            crate::workflow::signal::OperatorDecision::Rejected => "REJECTED".to_string(),
+            crate::workflow::signal::OperatorDecision::ChangesRequested => {
+                "CHANGES_REQUESTED".to_string()
+            }
+        };
+        operator_verdict = Some(verdict);
+    }
+
     Ok(TriageReport {
         test_signature: input.test_signature,
         failure,
         bisection,
         candidate_bug_fact: repro.candidate_bug_fact,
-        status: "COMPLETED".to_string(),
+        operator_verdict,
+        status,
+    })
+}
+
+/// Input payload for initiating an independent review gate workflow.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewGateInput {
+    /// Target reference, PR, commit, or defect slug requiring review.
+    pub target_ref: String,
+    /// Optional description of the subject under review.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Identity of the agent or operator who requested the review.
+    #[serde(default)]
+    pub requested_by: Option<String>,
+}
+
+/// Report produced upon completion of a review gate workflow.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReviewGateReport {
+    /// Target reference that was reviewed.
+    pub target_ref: String,
+    /// Final operator verdict recorded by signal.
+    pub verdict: crate::workflow::signal::OperatorVerdict,
+    /// Terminal status matching the operator decision.
+    pub status: String,
+}
+
+/// Review gate workflow parking until an `operator_verdict` signal is received.
+#[workflow]
+pub async fn review_gate_workflow(
+    ctx: &WorkflowContext,
+    input: ReviewGateInput,
+) -> Result<ReviewGateReport, String> {
+    let raw_signal = ctx
+        .wait_for_signal("operator_verdict")
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let verdict: crate::workflow::signal::OperatorVerdict = serde_json::from_value(raw_signal)
+        .map_err(|e| format!("failed to parse OperatorVerdict payload: {e}"))?;
+
+    verdict
+        .validate()
+        .map_err(|e| format!(":db/neverZeroValue validation failure: {e}"))?;
+
+    let status = match verdict.decision {
+        crate::workflow::signal::OperatorDecision::Approved => "APPROVED".to_string(),
+        crate::workflow::signal::OperatorDecision::Rejected => "REJECTED".to_string(),
+        crate::workflow::signal::OperatorDecision::ChangesRequested => {
+            "CHANGES_REQUESTED".to_string()
+        }
+    };
+
+    Ok(ReviewGateReport {
+        target_ref: input.target_ref,
+        verdict,
+        status,
     })
 }
 
@@ -341,6 +431,7 @@ mod tests {
             candidate_commits: vec!["c1".to_string(), "c2".to_string()],
             failure_log: "assertion failed: `(left == right)`\n  left: `0`,\n right: `1`\n --> tests/test_repro.rs:42:5".to_string(),
             reproducer_file: None,
+            require_operator_review: false,
         };
 
         let norm = run_ingest_test_failure(input).expect("ingest should succeed");
@@ -358,6 +449,7 @@ mod tests {
             candidate_commits: vec![],
             failure_log: "error".to_string(),
             reproducer_file: None,
+            require_operator_review: false,
         };
 
         let err = run_ingest_test_failure(input).unwrap_err();

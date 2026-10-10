@@ -72,8 +72,8 @@ SQLite   Postgres
 
 - [x] 1. Implement Phase 0 test evidence extraction and AuthLedger directive scanning.
 - [x] 2. Adopt EARS specification methodology and headless-v1 schema from research lane.
-- [ ] 3. Implement Phase 1 local embedded SQLite WAL storage engine and schema migrations.
-- [ ] 4. Implement Phase 1 version-vector temporal frontier and snapshot forking primitives.
+- [x] 3. Implement Phase 1 local embedded SQLite WAL storage engine and schema migrations.
+- [x] 4. Implement Phase 1 version-vector temporal frontier and snapshot forking primitives.
 - [ ] 5. Implement Phase 2 Autumn Harvest deterministic event-sourced workflow runtime.
 - [ ] 6. Implement Phase 2 durable signal delivery with idempotency deduplication.
 - [ ] 7. Implement Phase 3 Wheelhorse reversibility gate and canary tripwire defenses.

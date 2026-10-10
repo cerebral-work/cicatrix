@@ -9,6 +9,9 @@
 pub mod sqlite;
 pub use sqlite::SqliteStore;
 
+#[allow(unused_imports)]
+pub use crate::frontier::{Frontier, FrontierError, FrontierStamp};
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -51,6 +54,9 @@ pub struct BugFact {
     pub reproducer: Option<String>,
     /// Structured stochastic failure telemetry, occurrences, and rerun policies (CER-2752).
     pub stochastic: Option<StochasticSpec>,
+    /// Multi-replica version-vector causal frontier (CER-2754, Phase 1.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontier: Option<Frontier>,
 }
 
 impl BugFact {
@@ -143,6 +149,7 @@ mod tests {
             do_not_generalize: false,
             reproducer: None,
             stochastic: None,
+            frontier: None,
         }
     }
 

@@ -496,3 +496,39 @@ fn drift_usage_errors() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+/// `query` with invalid `--frontier` prints a diagnostic and exits non-zero without network.
+#[test]
+fn query_invalid_frontier_fails_cleanly() {
+    let out = run(&["query", "src/lib.rs", "--frontier", "nodeA:0"]);
+    assert!(
+        !out.status.success(),
+        "query with zero timestamp frontier should fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid --frontier"),
+        "expected invalid --frontier in: {stderr}"
+    );
+
+    let out2 = run(&["query", "src/lib.rs", "--frontier", ""]);
+    assert!(
+        !out2.status.success(),
+        "query with empty frontier should fail"
+    );
+}
+
+/// `query` with `--frontier` missing argument exits non-zero with diagnostic.
+#[test]
+fn query_frontier_missing_arg_is_usage_error() {
+    let out = run(&["query", "src/lib.rs", "--frontier"]);
+    assert!(
+        !out.status.success(),
+        "query --frontier without value should fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--frontier needs a <vector>"),
+        "stderr: {stderr}"
+    );
+}

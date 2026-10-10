@@ -235,6 +235,7 @@ mod tests {
             do_not_generalize: false,
             reproducer: None,
             stochastic: None,
+            frontier: None,
         }
     }
 

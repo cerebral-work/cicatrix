@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS bug_facts (
     rerun_policy TEXT,
     closing_invariant TEXT,
     stochastic_json TEXT,
+    frontier TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     CHECK (length(trim(id)) > 0),
     CHECK (length(trim(symptom)) > 0),

@@ -127,18 +127,11 @@ pub fn seed_canaries(conn: &Connection) -> io::Result<usize> {
     for canary in defaults {
         canary.validate_never_zero_value()?;
         let roles_str = canary.authorized_roles.join(",");
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM tripwire_canaries WHERE id = ?1;",
-                params![&canary.id],
-                |row| row.get(0),
-            )
-            .map_err(|e| io::Error::other(e.to_string()))?;
-
-        if count == 0 {
-            conn.execute(
+        let rows = conn
+            .execute(
                 "INSERT INTO tripwire_canaries (id, sentinel_marker, target_path, description, authorized_roles, is_active, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(id) DO NOTHING;",
                 params![
                     &canary.id,
                     &canary.sentinel_marker,
@@ -150,8 +143,7 @@ pub fn seed_canaries(conn: &Connection) -> io::Result<usize> {
                 ],
             )
             .map_err(|e| io::Error::other(e.to_string()))?;
-            seeded += 1;
-        }
+        seeded += rows;
     }
     Ok(seeded)
 }

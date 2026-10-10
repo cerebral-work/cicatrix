@@ -70,11 +70,12 @@ run still spawns.
 
 ## 2 · Leg 2 — cortex: settle-outcome learning loop (SECOND consumer)
 
-**Semantic (CER-1827 spike, Path 1):** worker corrections become memory.
-One settle outcome → one reveried observation (`type=learning`,
-`topic_key=cortex/settle-outcomes/<source>`); worker context assembly prepends
-top-K for the event's source; cicatrix's drift detection consumes the same stream
-so cortex corrections sit alongside code-review corrections.
+**Semantic (CER-1827 spike / Cortex Spec 0024):** worker corrections become memory.
+One settle outcome → one reveried observation (`type=settle-outcome`,
+`topic_key=cortex/settle-outcomes/<source>`, with tags `source`, `action_type`,
+`guard_tier`, `operator_decision`); worker context assembly prepends top-K for
+the event's source; cicatrix ingests and deduplicates events from reverie,
+recording negative verdicts into `docs/sessions/observed/` defect facts.
 
 **Seams (cortex repo, as-built survey 2026-10-06):**
 - Write: new `cortex-worker::learning` tokio task, outbox consumer, idempotent on

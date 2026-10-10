@@ -23,6 +23,11 @@ pub const TRIPWIRE_SCHEMA: &str = include_str!("../../migrations/0002_tripwire_r
 pub const AUTONOMY_SCHEMA: &str = include_str!("../../migrations/0003_autonomy_ledger.sql");
 /// Cortex settle learning loop schema migration embedded at compile time (CER-2764, Phase 4.3).
 pub const CORTEX_SCHEMA: &str = include_str!("../../migrations/0004_cortex_settle_events.sql");
+/// Replication log schema migration embedded at compile time (CER-2765, Phase 4.4).
+pub const REPLICATION_SCHEMA: &str = include_str!("../../migrations/0005_replication_log.sql");
+
+#[cfg(test)]
+pub static TEST_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn sqlite_to_io(e: rusqlite::Error) -> io::Error {
     io::Error::other(e.to_string())
@@ -152,6 +157,8 @@ fn apply_migrations(conn: &Connection) -> io::Result<()> {
     crate::autonomy::seed_default_capabilities(conn)
         .map_err(|e| io::Error::other(e.to_string()))?;
     conn.execute_batch(CORTEX_SCHEMA).map_err(sqlite_to_io)?;
+    conn.execute_batch(REPLICATION_SCHEMA)
+        .map_err(sqlite_to_io)?;
     Ok(())
 }
 
@@ -351,6 +358,22 @@ impl SqliteStore {
                 .map_err(sqlite_to_io)?;
             }
         }
+
+        let frontier_for_log = frontier_str
+            .clone()
+            .unwrap_or_else(|| format!("{}:1", crate::replication::store::local_node_id()));
+        let payload_json = serde_json::to_string(fact)
+            .map_err(|e| io::Error::other(format!("JSON serialization error: {e}")))?;
+        crate::replication::store::append_log_entry(
+            &tx,
+            &crate::replication::store::local_node_id(),
+            "bug_fact",
+            &fact.id,
+            "upsert",
+            &payload_json,
+            &frontier_for_log,
+        )
+        .map_err(|e| io::Error::other(format!("replication log append failed: {e}")))?;
 
         tx.commit().map_err(sqlite_to_io)?;
         Ok(())

@@ -3306,3 +3306,221 @@ fn test_cortex_settle_http_rest_endpoints() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[test]
+fn test_replication_cli_lifecycle() {
+    let dir1 = tempfile::tempdir().unwrap();
+    let db1 = dir1.path().join("db1.sqlite");
+
+    let dir2 = tempfile::tempdir().unwrap();
+    let db2 = dir2.path().join("db2.sqlite");
+
+    let env1 = [
+        ("CICATRIX_DB_PATH", db1.to_str().unwrap()),
+        ("CICATRIX_OFFLINE", "1"),
+        ("CICATRIX_NODE_ID", "ceres"),
+    ];
+    let env2 = [
+        ("CICATRIX_DB_PATH", db2.to_str().unwrap()),
+        ("CICATRIX_OFFLINE", "1"),
+        ("CICATRIX_NODE_ID", "cygnus"),
+    ];
+
+    // 1. Initial status on empty db1
+    let out = run_with_env(&["replication", "status", "--json"], &env1);
+    assert!(out.status.success(), "status should succeed");
+    let val: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json status");
+    assert_eq!(val["node_id"], "ceres");
+    assert_eq!(val["local_head_tx"], 0);
+    assert_eq!(val["total_log_records"], 0);
+
+    // 2. Record a defect into db1
+    let out = run_with_env(
+        &["record", "docs/bugs/grounded/BUG_EMBED_EMPTY_INPUT_400.md"],
+        &env1,
+    );
+    assert!(
+        out.status.success(),
+        "record defect in db1 should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 3. Status on db1 shows updated head_tx
+    let out = run_with_env(&["replication", "status", "--json"], &env1);
+    assert!(out.status.success());
+    let val: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json status");
+    assert_eq!(val["local_head_tx"], 1);
+    assert_eq!(val["total_log_records"], 1);
+
+    // 4. Export segment from db1
+    let segment_path = dir1.path().join("segment.json");
+    let out = run_with_env(
+        &[
+            "replication",
+            "export",
+            "--since",
+            "0",
+            "--out",
+            segment_path.to_str().unwrap(),
+            "--json",
+        ],
+        &env1,
+    );
+    assert!(out.status.success(), "export should succeed");
+    let export_val: serde_json::Value = serde_json::from_slice(&out.stdout).expect("export json");
+    assert_eq!(export_val["from_tx"], 0);
+    assert_eq!(export_val["to_tx"], 1);
+    assert_eq!(export_val["node_id"], "ceres");
+    assert_eq!(export_val["records"].as_array().unwrap().len(), 1);
+    assert!(export_val["checksum"].is_string());
+
+    // 5. Apply segment into db2
+    let out = run_with_env(
+        &[
+            "replication",
+            "apply",
+            "--file",
+            segment_path.to_str().unwrap(),
+            "--json",
+        ],
+        &env2,
+    );
+    assert!(
+        out.status.success(),
+        "apply should succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let apply_val: serde_json::Value = serde_json::from_slice(&out.stdout).expect("apply json");
+    assert_eq!(apply_val["status"], "ok");
+    assert_eq!(apply_val["records_applied"], 1);
+    assert_eq!(apply_val["peer_id"], "ceres");
+
+    // 6. Query db2 to verify replicated bug fact is present
+    let out = run_with_env(
+        &[
+            "query",
+            "crates/reverie-store/src/embed.rs",
+            "--format",
+            "json",
+        ],
+        &env2,
+    );
+    assert!(out.status.success(), "query on db2 should succeed");
+    let facts: serde_json::Value = serde_json::from_slice(&out.stdout).expect("query json");
+    let facts_arr = facts.as_array().expect("facts array");
+    assert_eq!(facts_arr.len(), 1);
+    assert_eq!(facts_arr[0]["id"], "BUG_EMBED_EMPTY_INPUT_400");
+
+    // 7. Zero echo cycles verification: db2 local replication log has 0 entries
+    let out = run_with_env(&["replication", "status", "--json"], &env2);
+    assert!(out.status.success());
+    let val: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json status");
+    assert_eq!(
+        val["total_log_records"], 0,
+        "db2 should not create echo log entries"
+    );
+}
+
+#[test]
+fn test_replication_http_rest_endpoints() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("mcp_rep.sqlite");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let bind_addr = format!("127.0.0.1:{port}");
+    let mut child = Command::new(BIN)
+        .arg("serve")
+        .arg("--mcp")
+        .arg("--bind")
+        .arg(&bind_addr)
+        .env("CICATRIX_DB_PATH", db.to_str().unwrap())
+        .env("CICATRIX_OFFLINE", "1")
+        .env("CICATRIX_NODE_ID", "ceres-mcp")
+        .spawn()
+        .expect("start mcp server");
+    let mut connected = false;
+    for _ in 0..50 {
+        if let Ok(mut stream) = TcpStream::connect(&bind_addr) {
+            let _ = stream.write_all(b"GET /health HTTP/1.1\r\nConnection: close\r\n\r\n");
+            let mut buf = [0u8; 128];
+            if stream.read(&mut buf).is_ok() {
+                connected = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(connected, "server failed to become ready");
+
+    // 1. GET /api/v1/replication/status
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let req = format!("GET /api/v1/replication/status HTTP/1.1\r\nHost: {bind_addr}\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "got: {res}");
+        assert!(res.contains("\"node_id\":\"ceres-mcp\""), "got: {res}");
+        assert!(res.contains("\"local_head_tx\":0"), "got: {res}");
+    }
+
+    // 2. GET /api/v1/replication/segment?since_tx=0
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let req = format!("GET /api/v1/replication/segment?since_tx=0 HTTP/1.1\r\nHost: {bind_addr}\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "got: {res}");
+        assert!(res.contains("\"from_tx\":0"), "got: {res}");
+        assert!(res.contains("\"records\":[]"), "got: {res}");
+    }
+
+    // 3. POST /api/v1/replication/segment (Apply incoming segment)
+    {
+        let segment_json = r#"{
+            "from_tx": 0,
+            "to_tx": 1,
+            "node_id": "remote-peer",
+            "head_tx": 1,
+            "frontier": "remote-peer:1",
+            "checksum": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "records": []
+        }"#;
+
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let body_payload = format!(r#"{{"segment":{segment_json}}}"#);
+        let req = format!(
+            "POST /api/v1/replication/segment HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body_payload.len(),
+            body_payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "got: {res}");
+        assert!(res.contains("\"status\":\"ok\""), "got: {res}");
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}

@@ -11,6 +11,7 @@ mod gitf;
 pub mod hooks;
 pub mod masking;
 pub mod mcp;
+pub mod replication;
 mod reverie;
 pub mod reversibility;
 pub mod store;
@@ -51,6 +52,8 @@ fn main() -> ExitCode {
         "autonomy" => cmd_autonomy(&args[1..]),
         // Cortex settle learning loop outbox integration (CER-1827 / CER-2764, Phase 4.3)
         "cortex" => cmd_cortex(&args[1..]),
+        // Cluster log-segment shipping replication (CER-2765, Phase 4.4)
+        "replication" => cmd_replication(&args[1..]),
         // Streaming HTTP server for cluster runners
         "serve" => cmd_serve(&args[1..]),
         _ => {
@@ -65,6 +68,7 @@ fn main() -> ExitCode {
                  tripwire <list [--json] | check <target> [--content <text>] [--actor <actor>] [--action <action>] [--json] | touches [--limit <N>] [--canary <id>] [--json] | seed> | \
                  autonomy <status [--actor <actor>] [--capability <capability>] [--json] | promote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | demote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | history [--actor <actor>] [--capability <capability>] [--limit <N>] [--json] | check --actor <actor> --capability <capability> --tier <tier> [--json]> | \
                  cortex <ingest-settle [--file <path>] [--raw <json>] [--observed-dir <path>] [--actor <actor>] [--json] | settle-status [--json] | settle-events [--source <source>] [--negative <bool>] [--job <id>] [--limit <N>] [--json]> | \
+                 replication <export --since <tx> [--until <tx>] [--limit <N>] [--out <file>] [--actor <actor>] [--json] | apply (--file <path> | --raw <json>) [--actor <actor>] [--json] | status [--peer <id>] [--json] | sync --peer-url <url> [--peer-id <id>] [--actor <actor>] [--json]> | \
                  mcp [--stdio | --http [<bind>]] [--bind <bind>] | serve [--mcp] [--bind <bind>]>"
             );
             ExitCode::FAILURE
@@ -3500,6 +3504,371 @@ fn cmd_cortex(rest: &[String]) -> ExitCode {
             eprintln!(
                 "cicatrix cortex: unknown subcommand `{other}`; expected ingest-settle, settle-status, or settle-events"
             );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_replication(rest: &[String]) -> ExitCode {
+    if rest.is_empty() {
+        eprintln!(
+            "usage: cicatrix replication <export --since <tx> [--until <tx>] [--limit <N>] [--out <file>] [--actor <actor>] [--json] | \
+             apply (--file <path> | --raw <json>) [--actor <actor>] [--json] | \
+             status [--peer <id>] [--json] | \
+             sync --peer-url <url> [--peer-id <id>] [--actor <actor>] [--json]>"
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let subcmd = rest[0].as_str();
+    let sub_args = &rest[1..];
+
+    let store = match store::SqliteStore::from_env() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cicatrix replication: failed to open store: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match subcmd {
+        "export" => {
+            let mut since_tx: Option<u64> = None;
+            let mut until_tx: Option<u64> = None;
+            let mut limit: Option<u64> = None;
+            let mut out_file: Option<String> = None;
+            let mut actor: Option<String> = None;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--since" => match it.next().and_then(|v| v.parse::<u64>().ok()) {
+                        Some(v) => since_tx = Some(v),
+                        None => {
+                            eprintln!("cicatrix replication export: --since requires a valid integer transaction id");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--until" => match it.next().and_then(|v| v.parse::<u64>().ok()) {
+                        Some(v) => until_tx = Some(v),
+                        None => {
+                            eprintln!("cicatrix replication export: --until requires a valid integer transaction id");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--limit" => {
+                        match it.next().and_then(|v| v.parse::<u64>().ok()) {
+                            Some(v) => limit = Some(v),
+                            None => {
+                                eprintln!("cicatrix replication export: --limit requires a positive integer");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    }
+                    "--out" => match it.next() {
+                        Some(o) => out_file = Some(o.clone()),
+                        None => {
+                            eprintln!("cicatrix replication export: --out requires a file path");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--actor" => match it.next() {
+                        Some(a) => actor = Some(a.clone()),
+                        None => {
+                            eprintln!("cicatrix replication export: --actor requires an actor id");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => json_output = true,
+                    unknown => {
+                        eprintln!("cicatrix replication export: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            let since = match since_tx {
+                Some(s) => s,
+                None => {
+                    eprintln!("cicatrix replication export: missing required `--since <tx>`");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let segment = match replication::export_segment(
+                store.conn(),
+                since,
+                until_tx,
+                limit,
+                actor.as_deref(),
+            ) {
+                Ok(seg) => seg,
+                Err(e) => {
+                    eprintln!("cicatrix replication export error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let segment_json = match serde_json::to_string_pretty(&segment) {
+                Ok(j) => j,
+                Err(e) => {
+                    eprintln!("cicatrix replication export: JSON serialization failed: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            if let Some(out_path) = out_file {
+                if let Err(e) = std::fs::write(&out_path, &segment_json) {
+                    eprintln!("cicatrix replication export: failed to write to `{out_path}`: {e}");
+                    return ExitCode::FAILURE;
+                }
+                if json_output {
+                    println!("{segment_json}");
+                } else {
+                    println!(
+                        "Exported replication segment (window ({}, {}], {} records, checksum {}) to `{out_path}`",
+                        segment.from_tx, segment.to_tx, segment.records.len(), segment.checksum
+                    );
+                }
+            } else if json_output {
+                println!("{segment_json}");
+            } else {
+                println!(
+                    "Log Segment: node={} window=({}, {}] records={} head={} checksum={}",
+                    segment.node_id,
+                    segment.from_tx,
+                    segment.to_tx,
+                    segment.records.len(),
+                    segment.head_tx,
+                    segment.checksum
+                );
+                for (i, r) in segment.records.iter().enumerate() {
+                    println!(
+                        "  [{}] tx={} entity={}:{} action={} frontier={}",
+                        i + 1,
+                        r.tx_id,
+                        r.entity_type,
+                        r.entity_id,
+                        r.action,
+                        r.frontier
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        "apply" => {
+            let mut file_path: Option<String> = None;
+            let mut raw_json: Option<String> = None;
+            let mut actor: Option<String> = None;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--file" => match it.next() {
+                        Some(f) => file_path = Some(f.clone()),
+                        None => {
+                            eprintln!("cicatrix replication apply: --file requires <path>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--raw" => match it.next() {
+                        Some(r) => raw_json = Some(r.clone()),
+                        None => {
+                            eprintln!("cicatrix replication apply: --raw requires <json>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--actor" => match it.next() {
+                        Some(a) => actor = Some(a.clone()),
+                        None => {
+                            eprintln!("cicatrix replication apply: --actor requires <actor>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => json_output = true,
+                    unknown => {
+                        eprintln!("cicatrix replication apply: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            let segment_str = match (file_path, raw_json) {
+                (Some(path), None) => match std::fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("cicatrix replication apply: failed to read file `{path}`: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                (None, Some(raw)) => raw,
+                (Some(_), Some(_)) => {
+                    eprintln!(
+                        "cicatrix replication apply: specify either --file or --raw, not both"
+                    );
+                    return ExitCode::FAILURE;
+                }
+                (None, None) => {
+                    eprintln!(
+                        "cicatrix replication apply: must provide --file <path> or --raw <json>"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let segment: replication::LogSegment = match serde_json::from_str(&segment_str) {
+                Ok(seg) => seg,
+                Err(e) => {
+                    eprintln!("cicatrix replication apply: invalid segment JSON: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            match replication::apply_segment(store.conn(), &segment, actor.as_deref()) {
+                Ok(res) => {
+                    if json_output {
+                        println!("{}", serde_json::to_string_pretty(&res).unwrap_or_default());
+                    } else {
+                        println!(
+                            "Applied replication segment from peer `{}`: window=({}, {}], received={}, applied={}, skipped={}, local_head={}",
+                            res.peer_id, res.from_tx, res.to_tx, res.records_received, res.records_applied, res.duplicates_skipped, res.local_head_tx
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix replication apply error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "status" => {
+            let mut peer_filter: Option<String> = None;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--peer" => match it.next() {
+                        Some(p) => peer_filter = Some(p.clone()),
+                        None => {
+                            eprintln!("cicatrix replication status: --peer requires <peer_id>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => json_output = true,
+                    unknown => {
+                        eprintln!("cicatrix replication status: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            match replication::get_replication_status(store.conn(), peer_filter.as_deref()) {
+                Ok(status) => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&status).unwrap_or_default()
+                        );
+                    } else {
+                        println!("Cicatrix Replication Status:");
+                        println!("  Node ID:            {}", status.node_id);
+                        println!("  Local Head Tx:      {}", status.local_head_tx);
+                        println!("  Total Log Records:  {}", status.total_log_records);
+                        println!("  Causality Frontier: {}", status.frontier);
+                        println!("  Registered Peers:   {}", status.peers.len());
+                        for (i, p) in status.peers.iter().enumerate() {
+                            println!(
+                                "    [{}] peer={} url={} shipped_tx={} applied_tx={} last_sync={}",
+                                i + 1,
+                                p.peer_id,
+                                p.peer_url,
+                                p.last_shipped_tx,
+                                p.last_applied_tx,
+                                p.last_sync_at
+                            );
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix replication status error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "sync" => {
+            let mut peer_url: Option<String> = None;
+            let mut peer_id: Option<String> = None;
+            let mut actor: Option<String> = None;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--peer-url" => match it.next() {
+                        Some(u) => peer_url = Some(u.clone()),
+                        None => {
+                            eprintln!("cicatrix replication sync: --peer-url requires <url>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--peer-id" => match it.next() {
+                        Some(p) => peer_id = Some(p.clone()),
+                        None => {
+                            eprintln!("cicatrix replication sync: --peer-id requires <id>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--actor" => match it.next() {
+                        Some(a) => actor = Some(a.clone()),
+                        None => {
+                            eprintln!("cicatrix replication sync: --actor requires <actor>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => json_output = true,
+                    unknown => {
+                        eprintln!("cicatrix replication sync: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            let url = match peer_url {
+                Some(u) => u,
+                None => {
+                    eprintln!("cicatrix replication sync: missing required `--peer-url <url>`");
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            match replication::sync_peer(store.conn(), &url, peer_id.as_deref(), actor.as_deref()) {
+                Ok(sync_res) => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&sync_res).unwrap_or_default()
+                        );
+                    } else {
+                        println!(
+                            "Replication sync complete: peer `{}` at `{}`: shipped={}, applied={}, local_head={}, remote_head={}",
+                            sync_res.peer_id, sync_res.peer_url, sync_res.shipped_records, sync_res.applied_records, sync_res.local_head_tx, sync_res.remote_head_tx
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix replication sync error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        unknown => {
+            eprintln!("cicatrix replication: unknown subcommand `{unknown}`");
             ExitCode::FAILURE
         }
     }

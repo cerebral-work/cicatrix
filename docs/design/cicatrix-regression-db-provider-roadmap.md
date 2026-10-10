@@ -231,9 +231,12 @@ flowchart LR
   * Automatically prepends `<known-bugs>` guidance block to task prompts for touched paths before agent dispatch.
   * Enforced non-blocking fail-soft semantics on backend errors while preserving hard fail-closed security violations on canary tripwires.
   * Added `cicatrix context assemble` CLI subcommand, added `--format <human|soma-block|json>` and `--limit <N>` to `cicatrix query`, exposed `cicatrix_assemble_run_context` MCP tool, and connected `POST /api/v1/context/assemble` REST HTTP endpoint with Wheelhorse error masking.
-* [ ] **Milestone 4.3: Cortex Settle Learning Loop (CER-1827)**
-  * Subscribe Cicatrix to the Cortex settle outbox stream.
-  * Ingest negative settle verdicts as observed defect facts (`docs/sessions/observed/`).
+* [x] **Milestone 4.3: Cortex Settle Learning Loop (CER-1827 / CER-2764)**
+  * Implemented Cortex settle outbox stream consumer in Rust (`src/cortex/`) parsing settle outcome payloads.
+  * Ingested negative settle verdicts (operator discard, guard deny upheld) as observed defect facts conforming to `docs/sessions/_SCHEMA.md` in `docs/sessions/observed/` (`FACT_CORTEX_SETTLE_<SOURCE>_<JOB>.md`).
+  * Enforced deduplication and idempotency on `(job_id, settle_action)` or `event_id` in SQLite table `cortex_settle_events` (`migrations/0004_cortex_settle_events.sql`) with triggers forbidding `UPDATE` and `DELETE` mutations and `:db/neverZeroValue` check constraints.
+  * Enforced fail-closed synthetic canary tripwire guard checks on affected files, proposal summaries, and source identifiers.
+  * Exposed CLI commands `cicatrix cortex <ingest-settle|settle-status|settle-events>`, MCP tools (`cicatrix_ingest_cortex_settle`, `cicatrix_list_cortex_settles`, `cicatrix_cortex_settle_status`), and REST HTTP endpoints (`POST /api/v1/cortex/settle`, `GET /api/v1/cortex/settles`, `GET /api/v1/cortex/settle/status`) with Wheelhorse unified error masking.
 * [ ] **Milestone 4.4: Log-Segment Shipping Replication**
   * Implement `(SinceTx, UntilTx]` windowed log shipping.
   * Synchronize regression database state between local workstations (`ceres`) and cluster nodes (`cygnus`) across the Tailscale mesh.

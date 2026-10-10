@@ -429,6 +429,73 @@ pub fn mcp_tools() -> Vec<McpToolDefinition> {
                 "required": ["prompt", "paths"]
             }),
         },
+        McpToolDefinition {
+            name: "cicatrix_ingest_cortex_settle".to_string(),
+            description: "Ingest a Cortex settle outbox event or payload, recording it in the settle ledger and generating an observed defect fact if the verdict is negative.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "payload": {
+                        "description": "JSON string or object containing Cortex settle outbox event payload"
+                    },
+                    "observed_dir": {
+                        "type": "string",
+                        "description": "Optional custom directory path where negative defect markdown facts are written"
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Optional actor identity or role for audit logging and tripwire checks"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Snapshot branch identifier to target an isolated branch database"
+                    }
+                },
+                "required": ["payload"]
+            }),
+        },
+        McpToolDefinition {
+            name: "cicatrix_list_cortex_settles".to_string(),
+            description: "List recorded Cortex settle events from the append-only ledger with optional filtering.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "Filter settle events by origin source or channel"
+                    },
+                    "job_id": {
+                        "type": "string",
+                        "description": "Filter settle events by job identifier"
+                    },
+                    "is_negative": {
+                        "type": "boolean",
+                        "description": "Filter by negative verdict flag (discarded/denied)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of events to return"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Snapshot branch identifier to query an isolated branch database"
+                    }
+                }
+            }),
+        },
+        McpToolDefinition {
+            name: "cicatrix_cortex_settle_status".to_string(),
+            description: "Retrieve aggregate metrics and summary counts for the Cortex settle learning loop.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "branch": {
+                        "type": "string",
+                        "description": "Snapshot branch identifier to query an isolated branch database"
+                    }
+                }
+            }),
+        },
     ]
 }
 
@@ -456,6 +523,20 @@ pub fn open_store_target(branch: Option<&str>) -> Result<SqliteStore, ToolExecut
         SqliteStore::from_env().map_err(|e| {
             ToolExecutionError::Internal(format!("failed to open sqlite database: {e}"))
         })
+    }
+}
+
+/// Helper to open the appropriate `SqliteStore` targeting custom db_path, branch, or trunk.
+pub fn open_store_target_with_path(
+    branch: Option<&str>,
+    db_path: Option<&str>,
+) -> Result<SqliteStore, ToolExecutionError> {
+    if let Some(p) = db_path {
+        SqliteStore::open(p).map_err(|e| {
+            ToolExecutionError::Internal(format!("failed to open database at `{p}`: {e}"))
+        })
+    } else {
+        open_store_target(branch)
     }
 }
 
@@ -527,6 +608,9 @@ pub async fn execute_tool(name: &str, args: &Value) -> Result<Value, ToolExecuti
         "cicatrix_list_autonomy_history" => handle_list_autonomy_history(args),
         "cicatrix_check_autonomy" => handle_check_autonomy(args),
         "cicatrix_assemble_run_context" => handle_assemble_run_context(args),
+        "cicatrix_ingest_cortex_settle" => handle_ingest_cortex_settle(args),
+        "cicatrix_list_cortex_settles" => handle_list_cortex_settles(args),
+        "cicatrix_cortex_settle_status" => handle_cortex_settle_status(args),
         other => Err(ToolExecutionError::Client(format!(
             "unknown tool `{other}`"
         ))),
@@ -1374,6 +1458,102 @@ fn handle_assemble_run_context(args: &Value) -> Result<Value, ToolExecutionError
     }
 }
 
+fn handle_ingest_cortex_settle(args: &Value) -> Result<Value, ToolExecutionError> {
+    let payload = if let Some(p) = args.get("payload") {
+        if let Some(s) = p.as_str() {
+            s.to_string()
+        } else {
+            p.to_string()
+        }
+    } else if args.get("job_id").is_some() || args.get("event_id").is_some() {
+        args.to_string()
+    } else {
+        return Err(ToolExecutionError::Client(
+            "missing required parameter `payload`".to_string(),
+        ));
+    };
+
+    if payload.trim().is_empty() {
+        return Err(ToolExecutionError::Client(
+            "parameter `payload` cannot be empty".to_string(),
+        ));
+    }
+
+    let observed_dir = args.get("observed_dir").and_then(Value::as_str);
+    let branch = args.get("branch").and_then(Value::as_str);
+    let db_path = args.get("db_path").and_then(Value::as_str);
+    let actor = args
+        .get("actor")
+        .and_then(Value::as_str)
+        .unwrap_or("cicatrix-cortex-settle-consumer");
+
+    let store = open_store_target_with_path(branch, db_path)?;
+    let mut consumer = crate::cortex::SettleConsumer::new().with_actor(actor);
+    if let Some(dir) = observed_dir {
+        consumer = consumer.with_observed_dir(dir);
+    }
+
+    match store.ingest_cortex_settle_str(&consumer, &payload) {
+        Ok(results) => {
+            serde_json::to_value(&results).map_err(|e| ToolExecutionError::Internal(e.to_string()))
+        }
+        Err(crate::cortex::CortexError::Tripwire(msg)) => Err(ToolExecutionError::Client(format!(
+            "tripwire intrusion detected: {msg}"
+        ))),
+        Err(crate::cortex::CortexError::Validation(msg)) => Err(ToolExecutionError::Client(msg)),
+        Err(crate::cortex::CortexError::Json(e)) => Err(ToolExecutionError::Client(format!(
+            "invalid json payload: {e}"
+        ))),
+        Err(e) => Err(ToolExecutionError::Internal(e.to_string())),
+    }
+}
+
+fn handle_list_cortex_settles(args: &Value) -> Result<Value, ToolExecutionError> {
+    let source = args
+        .get("source")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let job_id = args
+        .get("job_id")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let is_negative = args.get("is_negative").and_then(Value::as_bool);
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|l| l as usize);
+    let branch = args.get("branch").and_then(Value::as_str);
+    let db_path = args.get("db_path").and_then(Value::as_str);
+
+    let store = open_store_target_with_path(branch, db_path)?;
+    let filter = crate::cortex::SettleQueryFilter {
+        source,
+        is_negative,
+        job_id,
+        limit,
+    };
+
+    match store.list_cortex_settle_events(&filter) {
+        Ok(events) => {
+            serde_json::to_value(&events).map_err(|e| ToolExecutionError::Internal(e.to_string()))
+        }
+        Err(e) => Err(ToolExecutionError::Internal(e.to_string())),
+    }
+}
+
+fn handle_cortex_settle_status(args: &Value) -> Result<Value, ToolExecutionError> {
+    let branch = args.get("branch").and_then(Value::as_str);
+    let db_path = args.get("db_path").and_then(Value::as_str);
+    let store = open_store_target_with_path(branch, db_path)?;
+
+    match store.get_cortex_settle_status() {
+        Ok(summary) => {
+            serde_json::to_value(&summary).map_err(|e| ToolExecutionError::Internal(e.to_string()))
+        }
+        Err(e) => Err(ToolExecutionError::Internal(e.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1381,8 +1561,11 @@ mod tests {
     #[test]
     fn test_mcp_tools_list_completeness() {
         let tools = mcp_tools();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 16);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"cicatrix_ingest_cortex_settle"));
+        assert!(names.contains(&"cicatrix_list_cortex_settles"));
+        assert!(names.contains(&"cicatrix_cortex_settle_status"));
         assert!(names.contains(&"cicatrix_query_known_bugs"));
         assert!(names.contains(&"cicatrix_verify_diff"));
         assert!(names.contains(&"cicatrix_record_defect"));
@@ -1688,5 +1871,89 @@ diff --git a/src/secrets.rs b/src/secrets.rs
         }
 
         std::env::remove_var("CICATRIX_DB_PATH");
+    }
+
+    #[tokio::test]
+    async fn test_cortex_settle_mcp_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("mcp_cortex_test.db");
+        let db_path_str = db_path.to_str().unwrap();
+        let observed_dir = dir.path().join("observed");
+        let _ = crate::store::SqliteStore::open(&db_path).unwrap();
+
+        // 1. Ingest negative settle event
+        let payload = json!({
+            "event_id": "evt-mcp-01",
+            "job_id": "job-mcp-01",
+            "source": "slack",
+            "action_type": "draft_reply",
+            "guard_tier": "tier2",
+            "guard_decision": "allow",
+            "operator_decision": "discard",
+            "settle_action": "discard",
+            "proposal_summary": "Incorrect reply draft",
+            "rejection_reason": "Factually incorrect guidance",
+            "files": ["src/reply.rs"],
+            "meta_pattern": "hallucination"
+        });
+        let ingest_args = json!({
+            "payload": payload,
+            "db_path": db_path_str,
+            "observed_dir": observed_dir.to_str().unwrap()
+        });
+        let res = handle_ingest_cortex_settle(&ingest_args).expect("ingest succeeds");
+        let results = res.as_array().expect("array of results");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["status"], "ingested_negative");
+        assert_eq!(results[0]["is_negative"], true);
+        assert!(results[0]["fact_path"].as_str().is_some());
+
+        // 2. Query status summary
+        let status_res = handle_cortex_settle_status(&json!({ "db_path": db_path_str }))
+            .expect("status succeeds");
+        assert_eq!(status_res["total_events"], 1);
+        assert_eq!(status_res["negative_verdicts"], 1);
+        assert_eq!(status_res["positive_verdicts"], 0);
+
+        // 3. List events
+        let list_args = json!({
+            "source": "slack",
+            "is_negative": true,
+            "db_path": db_path_str
+        });
+        let list_res = handle_list_cortex_settles(&list_args).expect("list succeeds");
+        let events = list_res.as_array().expect("array of events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["job_id"], "job-mcp-01");
+
+        // 4. Duplicate ingestion skips gracefully
+        let dup_res = handle_ingest_cortex_settle(&ingest_args).expect("dedup succeeds");
+        let dup_arr = dup_res.as_array().unwrap();
+        assert_eq!(dup_arr[0]["status"], "duplicate_skipped");
+
+        // 5. Tripwire canary touch fails closed
+        let tripwire_payload = json!({
+            "event_id": "evt-trip-01",
+            "job_id": "job-trip-01",
+            "source": "test",
+            "action_type": "test",
+            "guard_tier": "tier1",
+            "operator_decision": "apply",
+            "settle_action": "apply",
+            "proposal_summary": "touch canary",
+            "files": [".cicatrix/sentinel/canary_alpha.rs"]
+        });
+        let trip_args = json!({
+            "payload": tripwire_payload,
+            "db_path": db_path_str,
+            "actor": "suspicious-crawler"
+        });
+        let trip_err = handle_ingest_cortex_settle(&trip_args).expect_err("tripwire fails closed");
+        match trip_err {
+            ToolExecutionError::Client(msg) => {
+                assert!(msg.contains("tripwire intrusion detected"));
+            }
+            ToolExecutionError::Internal(e) => panic!("expected Client error, got Internal({e})"),
+        }
     }
 }

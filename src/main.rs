@@ -4,6 +4,7 @@ pub mod branch;
 mod bug_md;
 pub mod context;
 mod corpus;
+pub mod cortex;
 mod drift;
 pub mod frontier;
 mod gitf;
@@ -48,6 +49,8 @@ fn main() -> ExitCode {
         "tripwire" => cmd_tripwire(&args[1..]),
         // Earned autonomy trust ladder & promotion ledger (CER-2762, Phase 4.1)
         "autonomy" => cmd_autonomy(&args[1..]),
+        // Cortex settle learning loop outbox integration (CER-1827 / CER-2764, Phase 4.3)
+        "cortex" => cmd_cortex(&args[1..]),
         // Streaming HTTP server for cluster runners
         "serve" => cmd_serve(&args[1..]),
         _ => {
@@ -61,6 +64,7 @@ fn main() -> ExitCode {
                  reversibility <eval|classify|plan|validate> [--diff <path>] [--tier <shadow|supervised|autonomous>] [--json] | \
                  tripwire <list [--json] | check <target> [--content <text>] [--actor <actor>] [--action <action>] [--json] | touches [--limit <N>] [--canary <id>] [--json] | seed> | \
                  autonomy <status [--actor <actor>] [--capability <capability>] [--json] | promote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | demote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | history [--actor <actor>] [--capability <capability>] [--limit <N>] [--json] | check --actor <actor> --capability <capability> --tier <tier> [--json]> | \
+                 cortex <ingest-settle [--file <path>] [--raw <json>] [--observed-dir <path>] [--actor <actor>] [--json] | settle-status [--json] | settle-events [--source <source>] [--negative <bool>] [--job <id>] [--limit <N>] [--json]> | \
                  mcp [--stdio | --http [<bind>]] [--bind <bind>] | serve [--mcp] [--bind <bind>]>"
             );
             ExitCode::FAILURE
@@ -3181,6 +3185,320 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
         other => {
             eprintln!(
                 "cicatrix autonomy: unknown subcommand `{other}`; expected status, promote, demote, history, or check"
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `cortex <ingest-settle|settle-status|settle-events>` — Cortex settle learning loop outbox integration (CER-2764, Phase 4.3).
+fn cmd_cortex(rest: &[String]) -> ExitCode {
+    if rest.is_empty() {
+        eprintln!(
+            "usage: cicatrix cortex <ingest-settle [--file <path>] [--raw <json>] [--observed-dir <path>] [--actor <actor>] [--json] | \
+             settle-status [--json] | \
+             settle-events [--source <source>] [--negative <bool>] [--job <id>] [--limit <N>] [--json]>"
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let subcmd = rest[0].as_str();
+    let sub_args = &rest[1..];
+
+    let store = match store::SqliteStore::from_env() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cicatrix cortex: failed to open store: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match subcmd {
+        "ingest-settle" => {
+            let mut file_path: Option<String> = None;
+            let mut raw_json: Option<String> = None;
+            let mut observed_dir: Option<String> = None;
+            let mut actor: Option<String> = None;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--file" => match it.next() {
+                        Some(f) => file_path = Some(f.clone()),
+                        None => {
+                            eprintln!("cicatrix cortex ingest-settle: --file requires <path>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--raw" => match it.next() {
+                        Some(r) => raw_json = Some(r.clone()),
+                        None => {
+                            eprintln!("cicatrix cortex ingest-settle: --raw requires <json>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--observed-dir" => match it.next() {
+                        Some(d) => observed_dir = Some(d.clone()),
+                        None => {
+                            eprintln!(
+                                "cicatrix cortex ingest-settle: --observed-dir requires <path>"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--actor" => match it.next() {
+                        Some(a) => actor = Some(a.clone()),
+                        None => {
+                            eprintln!("cicatrix cortex ingest-settle: --actor requires <actor>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => json_output = true,
+                    unknown => {
+                        eprintln!("cicatrix cortex ingest-settle: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            let mut consumer = crate::cortex::SettleConsumer::new();
+            if let Some(dir) = observed_dir {
+                consumer = consumer.with_observed_dir(dir);
+            }
+            if let Some(a) = actor {
+                consumer = consumer.with_actor(a);
+            }
+
+            let content = if let Some(path) = file_path {
+                match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!(
+                            "cicatrix cortex ingest-settle: failed to read file `{path}`: {e}"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else if let Some(r) = raw_json {
+                r
+            } else {
+                let mut buffer = String::new();
+                if let Err(e) = std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer) {
+                    eprintln!("cicatrix cortex ingest-settle: failed to read stdin: {e}");
+                    return ExitCode::FAILURE;
+                }
+                buffer
+            };
+
+            match store.ingest_cortex_settle_str(&consumer, &content) {
+                Ok(results) => {
+                    if json_output {
+                        match serde_json::to_string_pretty(&results) {
+                            Ok(j) => println!("{j}"),
+                            Err(e) => {
+                                eprintln!("cicatrix cortex ingest-settle: json error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else if results.is_empty() {
+                        println!("No settle events processed.");
+                    } else {
+                        println!("Processed {} settle event(s):", results.len());
+                        for r in &results {
+                            println!(
+                                "  [{}] event: {} job: {} source: {} negative: {}",
+                                r.status.as_str(),
+                                r.event_id,
+                                r.job_id,
+                                r.source,
+                                r.is_negative
+                            );
+                            if let Some(path) = &r.fact_path {
+                                println!("      fact written: {path}");
+                            }
+                            println!("      message: {}", r.message);
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(crate::cortex::CortexError::Tripwire(intr)) => {
+                    eprintln!("TRIPWIRE INTRUSION DETECTED: {intr}");
+                    ExitCode::FAILURE
+                }
+                Err(e) => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "status": "error",
+                                "error": e.to_string()
+                            })
+                        );
+                    } else {
+                        eprintln!("cicatrix cortex ingest-settle failed: {e}");
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "settle-status" => {
+            let mut json_output = false;
+            for arg in sub_args {
+                if arg == "--json" {
+                    json_output = true;
+                }
+            }
+
+            match store.get_cortex_settle_status() {
+                Ok(summary) => {
+                    if json_output {
+                        match serde_json::to_string_pretty(&summary) {
+                            Ok(j) => println!("{j}"),
+                            Err(e) => {
+                                eprintln!("cicatrix cortex settle-status: json error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else {
+                        println!("Cortex Settle Learning Loop Status:");
+                        println!("  Total events: {}", summary.total_events);
+                        println!("  Negative verdicts: {}", summary.negative_verdicts);
+                        println!("  Positive verdicts: {}", summary.positive_verdicts);
+                        println!("  Observed facts linked: {}", summary.observed_facts_linked);
+                        if let Some(latest) = &summary.latest_event_at {
+                            println!("  Latest event at: {latest}");
+                        }
+                        if summary.sources.is_empty() {
+                            println!("  Sources: none recorded");
+                        } else {
+                            println!("  Sources breakdown:");
+                            for s in &summary.sources {
+                                println!("    - {}: {}", s.source, s.count);
+                            }
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix cortex settle-status failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "settle-events" => {
+            let mut source: Option<String> = None;
+            let mut is_negative: Option<bool> = None;
+            let mut job_id: Option<String> = None;
+            let mut limit: Option<usize> = None;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--source" => match it.next() {
+                        Some(s) => source = Some(s.clone()),
+                        None => {
+                            eprintln!("cicatrix cortex settle-events: --source requires <source>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--negative" => match it.next() {
+                        Some(n) => match n.to_lowercase().as_str() {
+                            "true" | "1" => is_negative = Some(true),
+                            "false" | "0" => is_negative = Some(false),
+                            other => {
+                                eprintln!(
+                                    "cicatrix cortex settle-events: invalid boolean `{other}`"
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                        },
+                        None => {
+                            eprintln!(
+                                "cicatrix cortex settle-events: --negative requires <true|false>"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--job" => match it.next() {
+                        Some(j) => job_id = Some(j.clone()),
+                        None => {
+                            eprintln!("cicatrix cortex settle-events: --job requires <id>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--limit" => match it.next() {
+                        Some(l) => match l.parse::<usize>() {
+                            Ok(val) => limit = Some(val),
+                            Err(e) => {
+                                eprintln!(
+                                    "cicatrix cortex settle-events: invalid limit `{l}`: {e}"
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                        },
+                        None => {
+                            eprintln!("cicatrix cortex settle-events: --limit requires <N>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => json_output = true,
+                    unknown => {
+                        eprintln!("cicatrix cortex settle-events: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            let filter = crate::cortex::SettleQueryFilter {
+                source,
+                is_negative,
+                job_id,
+                limit,
+            };
+
+            match store.list_cortex_settle_events(&filter) {
+                Ok(events) => {
+                    if json_output {
+                        match serde_json::to_string_pretty(&events) {
+                            Ok(j) => println!("{j}"),
+                            Err(e) => {
+                                eprintln!("cicatrix cortex settle-events: json error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else if events.is_empty() {
+                        println!("No settle events recorded matching query.");
+                    } else {
+                        println!("Recorded Settle Events ({}):", events.len());
+                        for ev in &events {
+                            println!(
+                                "  [{}] event: {} job: {} source: {} action: {} (negative: {})",
+                                ev.created_at,
+                                ev.event_id,
+                                ev.job_id,
+                                ev.source,
+                                ev.settle_action,
+                                ev.is_negative
+                            );
+                            println!("      summary: {}", ev.proposal_summary);
+                            if let Some(fact_path) = &ev.fact_path {
+                                println!("      fact path: {fact_path}");
+                            }
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix cortex settle-events failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        other => {
+            eprintln!(
+                "cicatrix cortex: unknown subcommand `{other}`; expected ingest-settle, settle-status, or settle-events"
             );
             ExitCode::FAILURE
         }

@@ -191,29 +191,11 @@ async fn send_http_response(
     Ok(())
 }
 
-async fn handle_rest_tool_call(
+async fn handle_rest_tool_call_value(
     tool_name: &str,
-    body: &[u8],
+    payload: Value,
     stream: &mut TcpStream,
 ) -> io::Result<()> {
-    let payload_val: Result<Value, _> = serde_json::from_slice(body);
-    let payload = match payload_val {
-        Ok(v) => v,
-        Err(e) => {
-            let masked = crate::masking::MaskedError::client(format!("invalid JSON payload: {e}"));
-            let (status, resp_body, _) = masked.to_http_response();
-            return send_http_response(
-                stream,
-                status,
-                "Bad Request",
-                "application/json",
-                &[],
-                resp_body.as_bytes(),
-            )
-            .await;
-        }
-    };
-
     match execute_tool(tool_name, &payload).await {
         Ok(res_val) => {
             let res_bytes = serde_json::to_vec(&res_val).unwrap_or_default();
@@ -252,6 +234,89 @@ async fn handle_rest_tool_call(
     }
 }
 
+async fn handle_rest_tool_call(
+    tool_name: &str,
+    body: &[u8],
+    stream: &mut TcpStream,
+) -> io::Result<()> {
+    let payload = if body.is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                let masked =
+                    crate::masking::MaskedError::client(format!("invalid JSON payload: {e}"));
+                let (status, resp_body, _) = masked.to_http_response();
+                return send_http_response(
+                    stream,
+                    status,
+                    "Bad Request",
+                    "application/json",
+                    &[],
+                    resp_body.as_bytes(),
+                )
+                .await;
+            }
+        }
+    };
+    handle_rest_tool_call_value(tool_name, payload, stream).await
+}
+
+fn simple_url_decode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '%' => {
+                let h1 = chars.next();
+                let h2 = chars.next();
+                if let (Some(c1), Some(c2)) = (h1, h2) {
+                    let hex = format!("{c1}{c2}");
+                    if let Ok(val) = u8::from_str_radix(&hex, 16) {
+                        result.push(val as char);
+                        continue;
+                    }
+                    result.push('%');
+                    result.push(c1);
+                    result.push(c2);
+                } else {
+                    result.push('%');
+                }
+            }
+            '+' => result.push(' '),
+            other => result.push(other),
+        }
+    }
+    result
+}
+
+fn parse_query_string(query: &str) -> Value {
+    let mut map = serde_json::Map::new();
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        let k = simple_url_decode(k);
+        let v = simple_url_decode(v);
+        if k == "is_negative" {
+            if let Ok(b) = v.parse::<bool>() {
+                map.insert(k, Value::Bool(b));
+                continue;
+            }
+        }
+        if k == "limit" {
+            if let Ok(num) = v.parse::<u64>() {
+                map.insert(k, json!(num));
+                continue;
+            }
+        }
+        map.insert(k, Value::String(v));
+    }
+    Value::Object(map)
+}
+
 async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
     let mut buf = vec![0u8; 8192];
     let mut header_bytes = Vec::new();
@@ -269,7 +334,8 @@ async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
             let req_line = lines.next().unwrap_or("");
             let mut parts = req_line.split_whitespace();
             let method = parts.next().unwrap_or("").to_uppercase();
-            let path = parts.next().unwrap_or("/");
+            let full_path = parts.next().unwrap_or("/");
+            let (route, query) = full_path.split_once('?').unwrap_or((full_path, ""));
 
             let mut content_length: usize = 0;
             for line in lines {
@@ -290,7 +356,7 @@ async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
                 body.extend_from_slice(&buf[..read_n]);
             }
 
-            match (method.as_str(), path) {
+            match (method.as_str(), route) {
                 ("GET", "/health") => {
                     let res_body = json!({
                         "status": "ok",
@@ -407,6 +473,39 @@ async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
                         .await?;
                     return Ok(());
                 }
+                ("POST", "/api/v1/cortex/settle") => {
+                    handle_rest_tool_call("cicatrix_ingest_cortex_settle", &body, &mut stream)
+                        .await?;
+                    return Ok(());
+                }
+                ("GET", "/api/v1/cortex/settles") => {
+                    handle_rest_tool_call_value(
+                        "cicatrix_list_cortex_settles",
+                        parse_query_string(query),
+                        &mut stream,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                ("POST", "/api/v1/cortex/settles") => {
+                    handle_rest_tool_call("cicatrix_list_cortex_settles", &body, &mut stream)
+                        .await?;
+                    return Ok(());
+                }
+                ("GET", "/api/v1/cortex/settle/status") => {
+                    handle_rest_tool_call_value(
+                        "cicatrix_cortex_settle_status",
+                        parse_query_string(query),
+                        &mut stream,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                ("POST", "/api/v1/cortex/settle/status") => {
+                    handle_rest_tool_call("cicatrix_cortex_settle_status", &body, &mut stream)
+                        .await?;
+                    return Ok(());
+                }
                 ("GET", "/api/v1/error/simulate_500") | ("POST", "/api/v1/error/simulate_500") => {
                     let masked = crate::masking::MaskedError::internal(
                         "simulated internal database error at /home/ctodie/db.sqlite with token=secret123"
@@ -506,6 +605,90 @@ mod tests {
         assert_eq!(
             resp["error"]["code"],
             crate::mcp::protocol::METHOD_NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_cortex_settle_endpoints() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("cortex_test.db");
+        let db_path_str = db_path.to_str().unwrap();
+        let sessions_dir = tmp.path().join("sessions");
+        let sessions_dir_str = sessions_dir.to_str().unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _ = handle_http_connection(socket).await;
+                });
+            }
+        });
+
+        // 1. Ingest negative settle event via POST /api/v1/cortex/settle
+        let mut client = TcpStream::connect(local_addr).await.unwrap();
+        let payload = json!({
+            "event_id": "evt-http-001",
+            "job_id": "job-http-001",
+            "settle_action": "discard",
+            "verdict": "operator discarded run",
+            "db_path": db_path_str,
+            "observed_dir": sessions_dir_str,
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let req = format!(
+            "POST /api/v1/cortex/settle HTTP/1.1\r\nHost: {local_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        client.write_all(&body).await.unwrap();
+
+        let mut res = Vec::new();
+        client.read_to_end(&mut res).await.unwrap();
+        let res_str = String::from_utf8_lossy(&res);
+        assert!(
+            res_str.contains("200 OK"),
+            "Expected 200 OK, got: {res_str}"
+        );
+        assert!(res_str.contains("\"status\":\"ingested_negative\""));
+        assert!(res_str.contains("\"is_negative\":true"));
+
+        // 2. Query status via GET /api/v1/cortex/settle/status?db_path=...
+        let mut client2 = TcpStream::connect(local_addr).await.unwrap();
+        let req2 = format!(
+            "GET /api/v1/cortex/settle/status?db_path={db_path_str} HTTP/1.1\r\nHost: {local_addr}\r\nConnection: close\r\n\r\n"
+        );
+        client2.write_all(req2.as_bytes()).await.unwrap();
+        let mut res2 = Vec::new();
+        client2.read_to_end(&mut res2).await.unwrap();
+        let res2_str = String::from_utf8_lossy(&res2);
+        assert!(
+            res2_str.contains("200 OK"),
+            "Expected 200 OK, got: {res2_str}"
+        );
+        assert!(
+            res2_str.contains("\"negative_verdicts\":1"),
+            "Expected negative_verdicts:1, got: {res2_str}"
+        );
+
+        // 3. Query settles via GET /api/v1/cortex/settles?db_path=...&is_negative=true
+        let mut client3 = TcpStream::connect(local_addr).await.unwrap();
+        let req3 = format!(
+            "GET /api/v1/cortex/settles?db_path={db_path_str}&is_negative=true HTTP/1.1\r\nHost: {local_addr}\r\nConnection: close\r\n\r\n"
+        );
+        client3.write_all(req3.as_bytes()).await.unwrap();
+        let mut res3 = Vec::new();
+        client3.read_to_end(&mut res3).await.unwrap();
+        let res3_str = String::from_utf8_lossy(&res3);
+        assert!(
+            res3_str.contains("200 OK"),
+            "Expected 200 OK, got: {res3_str}"
+        );
+        assert!(
+            res3_str.contains("evt-http-001"),
+            "Expected evt-http-001, got: {res3_str}"
         );
     }
 }

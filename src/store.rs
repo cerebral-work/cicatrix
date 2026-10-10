@@ -6,6 +6,9 @@
 //! projection. The trait below is the seam; its sole impl is [`crate::reverie::ReverieBridge`].
 //! AsOf(commit) is preserved without janus via git-ancestry over the fix-commit (`crate::gitf`).
 
+pub mod sqlite;
+pub use sqlite::SqliteStore;
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 

@@ -108,12 +108,22 @@ fn cmd_record(rest: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut bridge = reverie::ReverieBridge::from_env();
+    let mut store = match store::SqliteStore::from_env() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cicatrix record: failed to initialize sqlite database: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let mut recorded = 0usize;
     for f in &facts {
-        match bridge.record(f) {
+        match store.record(f) {
             Ok(()) => {
-                println!("recorded {} → reverie (project=cicatrix)", f.id);
+                if store.has_reverie() {
+                    println!("recorded {} → reverie (project=cicatrix)", f.id);
+                } else {
+                    println!("recorded {} → sqlite (project=cicatrix)", f.id);
+                }
                 recorded += 1;
             }
             Err(e) => eprintln!("cicatrix record: {} failed: {e}", f.id),

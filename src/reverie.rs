@@ -114,6 +114,7 @@ pub fn extract_slugs(body: &serde_json::Value) -> Vec<String> {
 
 /// HTTP client for reveried. Reverie supplies the *match*; the local corpus supplies the *content*
 /// (keeps the markdown canonical). `corpus_dir` is where query results are hydrated from.
+#[derive(Clone, Debug)]
 pub struct ReverieBridge {
     base_url: String,
     token: Option<String>,

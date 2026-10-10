@@ -386,6 +386,49 @@ pub fn mcp_tools() -> Vec<McpToolDefinition> {
                 "required": ["capability", "required_tier"]
             }),
         },
+        McpToolDefinition {
+            name: "cicatrix_assemble_run_context".to_string(),
+            description: "Assemble a task prompt by prepending a <known-bugs> regression block for touched files, following the Soma run-context assembly specification (CER-2611).".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Base task prompt to augment with regression context"
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of touched or modified file paths in the workspace"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of known bug facts to prepend (default: 3)"
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Commit SHA or comma-separated commit heads for historical filtering"
+                    },
+                    "frontier": {
+                        "type": "string",
+                        "description": "Version-vector frontier string (e.g. 'replicaA:42,replicaB:10')"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Snapshot branch identifier to query an isolated branch database"
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Identity or role of the agent initiating run-context assembly"
+                    },
+                    "fail_soft": {
+                        "type": "boolean",
+                        "description": "Whether to return the original prompt on non-fatal query errors (default: true)"
+                    }
+                },
+                "required": ["prompt", "paths"]
+            }),
+        },
     ]
 }
 
@@ -483,6 +526,7 @@ pub async fn execute_tool(name: &str, args: &Value) -> Result<Value, ToolExecuti
         "cicatrix_record_autonomy_event" => handle_record_autonomy_event(args),
         "cicatrix_list_autonomy_history" => handle_list_autonomy_history(args),
         "cicatrix_check_autonomy" => handle_check_autonomy(args),
+        "cicatrix_assemble_run_context" => handle_assemble_run_context(args),
         other => Err(ToolExecutionError::Client(format!(
             "unknown tool `{other}`"
         ))),
@@ -1262,6 +1306,74 @@ fn handle_check_autonomy(args: &Value) -> Result<Value, ToolExecutionError> {
     }))
 }
 
+fn handle_assemble_run_context(args: &Value) -> Result<Value, ToolExecutionError> {
+    let prompt = args.get("prompt").and_then(Value::as_str).ok_or_else(|| {
+        ToolExecutionError::Client("missing required parameter `prompt`".to_string())
+    })?;
+
+    let paths_val = args.get("paths").ok_or_else(|| {
+        ToolExecutionError::Client("missing required parameter `paths`".to_string())
+    })?;
+    let paths: Vec<String> = serde_json::from_value(paths_val.clone()).map_err(|e| {
+        ToolExecutionError::Client(format!("parameter `paths` must be array of strings: {e}"))
+    })?;
+
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map(|l| l as usize);
+    let as_of = args
+        .get("as_of")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let frontier = args
+        .get("frontier")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let branch = args
+        .get("branch")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let actor = args
+        .get("actor")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let fail_soft = args
+        .get("fail_soft")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let mut opts = crate::context::AssembleOptions::new(prompt, paths).with_fail_soft(fail_soft);
+    if let Some(l) = limit {
+        opts = opts.with_limit(l);
+    }
+    if let Some(a) = as_of {
+        opts = opts.with_as_of(a);
+    }
+    if let Some(f) = frontier {
+        opts = opts.with_frontier(f);
+    }
+    if let Some(b) = branch {
+        opts = opts.with_branch(b);
+    }
+    if let Some(act) = actor {
+        opts = opts.with_actor(act);
+    }
+
+    match crate::context::assemble_context(&opts) {
+        Ok(res) => {
+            serde_json::to_value(&res).map_err(|e| ToolExecutionError::Internal(e.to_string()))
+        }
+        Err(crate::context::ContextError::TripwireIntrusion(msg)) => Err(
+            ToolExecutionError::Client(format!("tripwire intrusion detected: {msg}")),
+        ),
+        Err(crate::context::ContextError::InvalidArgument(msg)) => {
+            Err(ToolExecutionError::Client(msg))
+        }
+        Err(crate::context::ContextError::Database(msg)) => Err(ToolExecutionError::Internal(msg)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1269,7 +1381,7 @@ mod tests {
     #[test]
     fn test_mcp_tools_list_completeness() {
         let tools = mcp_tools();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 13);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"cicatrix_query_known_bugs"));
         assert!(names.contains(&"cicatrix_verify_diff"));
@@ -1283,6 +1395,7 @@ mod tests {
         assert!(names.contains(&"cicatrix_record_autonomy_event"));
         assert!(names.contains(&"cicatrix_list_autonomy_history"));
         assert!(names.contains(&"cicatrix_check_autonomy"));
+        assert!(names.contains(&"cicatrix_assemble_run_context"));
     }
 
     #[test]
@@ -1503,5 +1616,77 @@ diff --git a/src/secrets.rs b/src/secrets.rs
             }
             ToolExecutionError::Internal(e) => panic!("expected client error, got Internal({e})"),
         }
+    }
+
+    #[test]
+    fn test_handle_assemble_run_context_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("mcp_test.db");
+        let mut store = crate::store::SqliteStore::open(&db_path).unwrap();
+
+        let fact = crate::store::BugFact {
+            id: "BUG_CTX_01".to_string(),
+            files: vec!["src/kernel.rs".to_string()],
+            symptom: "race condition in kernel".to_string(),
+            fix_commit: "deadbeef".to_string(),
+            regression_test: "tests/kernel_race.rs".to_string(),
+            meta_pattern: "concurrency-hazard".to_string(),
+            scope: None,
+            do_not_generalize: false,
+            reproducer: None,
+            stochastic: None,
+            frontier: None,
+        };
+        store.record(&fact).unwrap();
+        std::env::set_var("CICATRIX_DB_PATH", db_path.to_str().unwrap());
+
+        // 1. Missing required parameters
+        let missing_prompt = json!({ "paths": ["src/kernel.rs"] });
+        assert!(handle_assemble_run_context(&missing_prompt).is_err());
+        let missing_paths = json!({ "prompt": "Implement task" });
+        assert!(handle_assemble_run_context(&missing_paths).is_err());
+
+        // 2. Empty paths -> unmodified prompt
+        let empty_args = json!({
+            "prompt": "Implement kernel changes",
+            "paths": []
+        });
+        let res = handle_assemble_run_context(&empty_args).expect("empty paths succeeds");
+        assert_eq!(res["prompt"], "Implement kernel changes");
+        assert_eq!(res["matched_facts"], 0);
+        assert_eq!(res["block_rendered"], false);
+
+        // 3. Matched paths with bug fact -> prepends block
+        let match_args = json!({
+            "prompt": "Refactor scheduler",
+            "paths": ["src/kernel.rs"],
+            "actor": "operator",
+            "limit": 1
+        });
+        let res = handle_assemble_run_context(&match_args).expect("assemble succeeds");
+        assert_eq!(res["matched_facts"], 1);
+        assert_eq!(res["block_rendered"], true);
+        let prompt_str = res["prompt"].as_str().unwrap();
+        assert!(prompt_str.starts_with("<known-bugs>\n"));
+        assert!(prompt_str.contains(
+            "BUG_CTX_01 (concurrency-hazard): tests/kernel_race.rs — files: src/kernel.rs"
+        ));
+        assert!(prompt_str.ends_with("\n\nRefactor scheduler"));
+
+        // 4. Tripwire canary access fails closed
+        let tripwire_args = json!({
+            "prompt": "Probe canary file",
+            "paths": [".cicatrix/sentinel/canary_alpha.rs"],
+            "actor": "unauthorized_probe"
+        });
+        let err = handle_assemble_run_context(&tripwire_args).expect_err("tripwire fails closed");
+        match err {
+            ToolExecutionError::Client(msg) => {
+                assert!(msg.contains("tripwire intrusion detected"));
+            }
+            ToolExecutionError::Internal(e) => panic!("expected Client error, got Internal({e})"),
+        }
+
+        std::env::remove_var("CICATRIX_DB_PATH");
     }
 }

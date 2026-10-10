@@ -226,9 +226,11 @@ flowchart LR
   * Added CLI command `cicatrix autonomy <status|promote|demote|history|check>` with `--json` support.
   * Exposed 4 MCP tools (`cicatrix_get_autonomy_tier`, `cicatrix_record_autonomy_event`, `cicatrix_list_autonomy_history`, `cicatrix_check_autonomy`).
   * Connected REST HTTP endpoints (`/api/v1/autonomy/{tier,record,history,check}`) with unified correlation error masking.
-* [ ] **Milestone 4.2: Soma Run-Context Assembly Integration (CER-2611)**
-  * Wire Cicatrix MCP query directly into Soma run context assembly (`blackwall-cli/src/run.rs`).
-  * Prepend `<known-bugs>` guidance to task prompts automatically before execution begins.
+* [x] **Milestone 4.2: Soma Run-Context Assembly Integration (`CER-2763`, CER-2611)**
+  * Wired Cicatrix query into Soma run context assembly (`blackwall-cli/src/run.rs`, D2 contract).
+  * Automatically prepends `<known-bugs>` guidance block to task prompts for touched paths before agent dispatch.
+  * Enforced non-blocking fail-soft semantics on backend errors while preserving hard fail-closed security violations on canary tripwires.
+  * Added `cicatrix context assemble` CLI subcommand, added `--format <human|soma-block|json>` and `--limit <N>` to `cicatrix query`, exposed `cicatrix_assemble_run_context` MCP tool, and connected `POST /api/v1/context/assemble` REST HTTP endpoint with Wheelhorse error masking.
 * [ ] **Milestone 4.3: Cortex Settle Learning Loop (CER-1827)**
   * Subscribe Cicatrix to the Cortex settle outbox stream.
   * Ingest negative settle verdicts as observed defect facts (`docs/sessions/observed/`).

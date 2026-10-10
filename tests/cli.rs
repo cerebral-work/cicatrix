@@ -2663,3 +2663,323 @@ fn autonomy_rest_endpoints_and_error_masking() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+// === CER-2763 P4.2: Soma run-context assembly integration ===
+
+#[test]
+fn test_context_assemble_cli() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("context_cli.db");
+    let db_str = db_path.to_str().unwrap();
+    let envs = [("CICATRIX_DB_PATH", db_str), ("CICATRIX_NO_REVERIE", "1")];
+
+    // Seed grounded bug into test database
+    let out = run_with_env(
+        &["record", "docs/bugs/grounded/BUG_EMBED_EMPTY_INPUT_400.md"],
+        &envs,
+    );
+    assert!(
+        out.status.success(),
+        "record failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // 1. Text output with match prepends <known-bugs> block
+    let out = run_with_env(
+        &[
+            "context",
+            "assemble",
+            "--prompt",
+            "Refactor embed service input handler",
+            "crates/reverie-store/src/embed.rs",
+        ],
+        &envs,
+    );
+    assert!(
+        out.status.success(),
+        "assemble failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("<known-bugs>"));
+    assert!(stdout.contains("BUG_EMBED_EMPTY_INPUT_400 (Type mismatches kill): embed empty-input → zero-vector (not 400) — files: crates/reverie-store/src/embed.rs"));
+    assert!(stdout.contains("</known-bugs>"));
+    assert!(stdout.contains("Refactor embed service input handler"));
+
+    // 2. Unmatched path returns prompt unmodified with exit 0
+    let out_nomatch = run_with_env(
+        &[
+            "context",
+            "assemble",
+            "--prompt",
+            "Do unrelated task",
+            "crates/reverie-store/src/unrelated.rs",
+        ],
+        &envs,
+    );
+    assert!(out_nomatch.status.success());
+    let stdout_nomatch = String::from_utf8_lossy(&out_nomatch.stdout);
+    assert!(!stdout_nomatch.contains("<known-bugs>"));
+    assert_eq!(stdout_nomatch.trim(), "Do unrelated task");
+
+    // 3. No paths returns prompt unmodified with exit 0
+    let out_empty = run_with_env(
+        &["context", "assemble", "--prompt", "Do empty paths task"],
+        &envs,
+    );
+    assert!(out_empty.status.success());
+    let stdout_empty = String::from_utf8_lossy(&out_empty.stdout);
+    assert!(!stdout_empty.contains("<known-bugs>"));
+    assert_eq!(stdout_empty.trim(), "Do empty paths task");
+
+    // 4. JSON output format with structured metadata
+    let out_json = run_with_env(
+        &[
+            "context",
+            "assemble",
+            "--prompt",
+            "Refactor embed service input handler",
+            "crates/reverie-store/src/embed.rs",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(out_json.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out_json.stdout).expect("valid json");
+    assert_eq!(v["matched_facts"], 1);
+    assert_eq!(v["block_rendered"], true);
+    assert_eq!(v["facts"][0]["id"], "BUG_EMBED_EMPTY_INPUT_400");
+    assert!(v["prompt"].as_str().unwrap().contains("<known-bugs>"));
+    assert!(v["prompt"]
+        .as_str()
+        .unwrap()
+        .contains("Refactor embed service input handler"));
+
+    // 5. Fail-soft behavior on missing database path returns prompt unmodified with exit 0
+    let missing_db = tmp.path().join("nonexistent_dir").join("missing.db");
+    let missing_envs = [
+        ("CICATRIX_DB_PATH", missing_db.to_str().unwrap()),
+        ("CICATRIX_NO_REVERIE", "1"),
+    ];
+    let out_failsoft = run_with_env(
+        &[
+            "context",
+            "assemble",
+            "--prompt",
+            "Continue safely despite DB issue",
+            "crates/reverie-store/src/embed.rs",
+        ],
+        &missing_envs,
+    );
+    assert!(out_failsoft.status.success());
+    let stdout_failsoft = String::from_utf8_lossy(&out_failsoft.stdout);
+    assert_eq!(stdout_failsoft.trim(), "Continue safely despite DB issue");
+}
+
+#[test]
+fn test_context_assemble_tripwire_fail_closed_cli() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("context_tripwire.db");
+    let db_str = db_path.to_str().unwrap();
+    let envs = [
+        ("CICATRIX_DB_PATH", db_str),
+        ("CICATRIX_TRIPWIRE_MOCK_NOTIFY", "1"),
+    ];
+
+    let out = run_with_env(
+        &[
+            "context",
+            "assemble",
+            "--prompt",
+            "Secret agent prompt",
+            ".cicatrix/sentinel/canary_alpha.rs",
+            "--actor",
+            "unauthorized_agent",
+        ],
+        &envs,
+    );
+    assert!(
+        !out.status.success(),
+        "unauthorized canary touch must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("tripwire intrusion detected"));
+    assert!(stderr.contains("TRIPWIRE_CANARY_SENTINEL_ALPHA"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("Secret agent prompt"),
+        "prompt must never be printed on intrusion"
+    );
+}
+
+#[test]
+fn test_query_soma_block_and_json_format_cli() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("query_format.db");
+    let db_str = db_path.to_str().unwrap();
+    let envs = [("CICATRIX_DB_PATH", db_str), ("CICATRIX_NO_REVERIE", "1")];
+
+    let out = run_with_env(
+        &["record", "docs/bugs/grounded/BUG_EMBED_EMPTY_INPUT_400.md"],
+        &envs,
+    );
+    assert!(out.status.success());
+
+    // 1. --format soma-block
+    let out_block = run_with_env(
+        &[
+            "query",
+            "crates/reverie-store/src/embed.rs",
+            "--format",
+            "soma-block",
+        ],
+        &envs,
+    );
+    assert!(out_block.status.success());
+    let stdout_block = String::from_utf8_lossy(&out_block.stdout);
+    assert!(stdout_block.contains("<known-bugs>"));
+    assert!(stdout_block.contains("BUG_EMBED_EMPTY_INPUT_400"));
+    assert!(stdout_block.contains("</known-bugs>"));
+
+    // 2. --format json
+    let out_json = run_with_env(
+        &[
+            "query",
+            "crates/reverie-store/src/embed.rs",
+            "--format",
+            "json",
+        ],
+        &envs,
+    );
+    assert!(out_json.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out_json.stdout).expect("valid json");
+    let arr = v.as_array().expect("array of facts");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], "BUG_EMBED_EMPTY_INPUT_400");
+}
+
+#[test]
+fn test_rest_context_assemble_endpoint() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("context_rest.db");
+    let db_str = db_path.to_str().unwrap().to_string();
+
+    let envs = [
+        ("CICATRIX_DB_PATH", db_str.as_str()),
+        ("CICATRIX_NO_REVERIE", "1"),
+    ];
+    let out = run_with_env(
+        &["record", "docs/bugs/grounded/BUG_EMBED_EMPTY_INPUT_400.md"],
+        &envs,
+    );
+    assert!(out.status.success());
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let bind_addr = format!("127.0.0.1:{port}");
+
+    let mut child = Command::new(BIN)
+        .arg("serve")
+        .arg("--mcp")
+        .arg("--bind")
+        .arg(&bind_addr)
+        .env("CICATRIX_DB_PATH", &db_str)
+        .env("CICATRIX_NO_REVERIE", "1")
+        .spawn()
+        .expect("failed to spawn cicatrix serve --mcp");
+
+    // Wait until server is reachable
+    let mut connected = false;
+    for _ in 0..50 {
+        if let Ok(mut stream) = TcpStream::connect(&bind_addr) {
+            let req =
+                format!("GET /health HTTP/1.1\r\nHost: {bind_addr}\r\nConnection: close\r\n\r\n");
+            if stream.write_all(req.as_bytes()).is_ok() {
+                let mut res = String::new();
+                if stream.read_to_string(&mut res).is_ok() && res.contains("200 OK") {
+                    connected = true;
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(connected, "HTTP server did not become ready in time");
+
+    // 1. POST /api/v1/context/assemble: Augmented prompt
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let payload = serde_json::json!({
+            "prompt": "Soma execution prompt",
+            "paths": ["crates/reverie-store/src/embed.rs"],
+            "limit": 3
+        })
+        .to_string();
+        let req = format!(
+            "POST /api/v1/context/assemble HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "Expected 200 OK, got: {res}");
+        assert!(
+            res.contains("<known-bugs>"),
+            "Expected <known-bugs> in response, got: {res}"
+        );
+        assert!(
+            res.contains("BUG_EMBED_EMPTY_INPUT_400"),
+            "Expected BUG_EMBED_EMPTY_INPUT_400, got: {res}"
+        );
+        assert!(
+            res.contains("Soma execution prompt"),
+            "Expected original prompt, got: {res}"
+        );
+    }
+
+    // 2. POST /api/v1/context/assemble: Canary tripwire intrusion returns 400 Bad Request
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let payload = serde_json::json!({
+            "prompt": "Unauthorized probe",
+            "paths": [".cicatrix/sentinel/canary_alpha.rs"],
+            "actor": "rogue_agent"
+        })
+        .to_string();
+        let req = format!(
+            "POST /api/v1/context/assemble HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(
+            res.contains("400 Bad Request"),
+            "Expected 400 Bad Request on canary tripwire, got: {res}"
+        );
+        assert!(
+            res.contains("tripwire intrusion detected"),
+            "Expected intrusion error, got: {res}"
+        );
+        assert!(!res.contains("/home/"), "Leaked path in body: {res}");
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}

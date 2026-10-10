@@ -402,6 +402,11 @@ async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
                     handle_rest_tool_call("cicatrix_check_autonomy", &body, &mut stream).await?;
                     return Ok(());
                 }
+                ("POST", "/api/v1/context/assemble") => {
+                    handle_rest_tool_call("cicatrix_assemble_run_context", &body, &mut stream)
+                        .await?;
+                    return Ok(());
+                }
                 ("GET", "/api/v1/error/simulate_500") | ("POST", "/api/v1/error/simulate_500") => {
                     let masked = crate::masking::MaskedError::internal(
                         "simulated internal database error at /home/ctodie/db.sqlite with token=secret123"

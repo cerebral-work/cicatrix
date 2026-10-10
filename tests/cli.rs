@@ -3524,3 +3524,104 @@ fn test_replication_http_rest_endpoints() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[test]
+fn test_diagnose_cli_usage_errors() {
+    let out_empty = run(&["diagnose"]);
+    assert!(
+        !out_empty.status.success(),
+        "diagnose with no args should fail"
+    );
+    let stderr = String::from_utf8_lossy(&out_empty.stderr);
+    assert!(
+        stderr.contains("usage: cicatrix diagnose"),
+        "stderr: {stderr}"
+    );
+
+    let out_help = run(&["diagnose", "--help"]);
+    assert!(out_help.status.success(), "diagnose --help should succeed");
+    let stderr_help = String::from_utf8_lossy(&out_help.stderr);
+    assert!(
+        stderr_help.contains("usage: cicatrix diagnose"),
+        "stderr: {stderr_help}"
+    );
+}
+
+#[test]
+fn test_diagnose_cli_bounds_validation() {
+    let out_zero = run(&["diagnose", "tests::test_foo", "--forks", "0"]);
+    assert!(!out_zero.status.success());
+    let stderr_zero = String::from_utf8_lossy(&out_zero.stderr);
+    assert!(
+        stderr_zero.contains("fork count") || stderr_zero.contains("forks"),
+        "stderr: {stderr_zero}"
+    );
+
+    let out_six = run(&["diagnose", "tests::test_foo", "--forks", "6"]);
+    assert!(!out_six.status.success());
+    let stderr_six = String::from_utf8_lossy(&out_six.stderr);
+    assert!(
+        stderr_six.contains("fork count") || stderr_six.contains("forks"),
+        "stderr: {stderr_six}"
+    );
+}
+
+#[test]
+fn test_diagnose_cli_with_json_and_no_write() {
+    let out = run(&[
+        "diagnose",
+        "tests::test_cli_diagnose_json",
+        "--log",
+        "thread panicked at assertion failed\n  --> src/cli.rs:25:5",
+        "--files",
+        "src/cli.rs",
+        "--forks",
+        "3",
+        "--no-write",
+        "--json",
+    ]);
+    assert!(out.status.success(), "diagnose --json should succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).expect("valid json stdout");
+    assert_eq!(val["target"], "tests::test_cli_diagnose_json");
+    assert_eq!(val["winning_hypothesis_id"], "hyp-1");
+    assert_eq!(val["hypotheses"].as_array().unwrap().len(), 3);
+    assert_eq!(val["bug_fact"]["id"], "BUG_TESTS_TEST_CLI_DIAGNOSE_JSON");
+    assert!(val["output_file"].is_null());
+}
+
+#[test]
+fn test_diagnose_cli_writes_observed_bug_fact() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out_dir = tmp.path().to_str().unwrap();
+
+    let out = run(&[
+        "diagnose",
+        "tests::test_cli_writes_artifact",
+        "--log",
+        "error[E0308]: mismatched types\n  --> src/lib.rs:12:5",
+        "--files",
+        "src/lib.rs",
+        "--out-dir",
+        out_dir,
+    ]);
+    assert!(out.status.success(), "diagnose should succeed");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Diagnosed target `tests::test_cli_writes_artifact`"));
+    assert!(stdout.contains("Observed BugFact written to:"));
+
+    let expected_file = tmp.path().join("BUG_TESTS_TEST_CLI_WRITES_ARTIFACT.md");
+    assert!(
+        expected_file.exists(),
+        "expected generated bug fact on disk"
+    );
+
+    let content = std::fs::read_to_string(&expected_file).expect("read file");
+    assert!(content.contains("> **Observed tier — ungrounded.** Drafted by `cicatrix diagnose`."));
+    assert!(content.contains("BUG_TESTS_TEST_CLI_WRITES_ARTIFACT"));
+    assert!(content.contains("## Symptom"));
+    assert!(content.contains("## Root cause"));
+    assert!(content.contains("## Reproduction"));
+    assert!(content.contains("## Resolution"));
+    assert!(content.contains("## Lesson"));
+}

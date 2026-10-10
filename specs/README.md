@@ -5,6 +5,7 @@ This directory holds the specification registry. Every spec is one file.
 | Spec | Title | Status | Priority |
 |---|---|---|---|
 | [0001](0001-cicatrix-regression-db-provider.md) | Cicatrix regression db provider | in-progress | high |
+| [0002](0002-diagnose-auto-authoring.md) | Diagnose auto-authoring | complete | high |
 
 ## How to add a spec
 

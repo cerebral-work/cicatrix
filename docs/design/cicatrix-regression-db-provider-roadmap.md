@@ -186,12 +186,13 @@ sequenceDiagram
 ### Phase 3: Wheelhorse Reversibility Rails & Canary Tripwires (v0.5)
 **Goal:** Enforce safety boundaries on agent mutations and detect unauthorized regression modifications.
 
-* [ ] **Milestone 3.1: Reversibility Pipeline (`crm-core-reversibility`)**
-  * Implement the 4-stage decision pipeline in Rust:
-    * `classify`: Determine whether touched surfaces are reversible (code edits, test additions) or one-way doors (migration drops, secret rotations).
-    * `capture_plan`: Machine-generate or validate the rollback patch / reversal action.
-    * `validate`: Execute the rollback in a speculative sandbox; confirm clean baseline restoration.
-    * `decide`: Return `AutoCommit`, `AutoCommitWithNotice`, `RouteToApproval`, or `Block`.
+* [x] **Milestone 3.1: Reversibility Pipeline (`crm-core-reversibility` / `CER-2759`)**
+  * Implemented the 4-stage decision pipeline in Rust (`src/reversibility/`):
+    * `classify`: Determine whether touched surfaces are reversible (code edits, test additions) or one-way doors (migration drops, secret rotations), detecting sentinel tripwires.
+    * `capture_plan`: Machine-generate or validate the compensation plan / reversal action with inverse diffs.
+    * `validate`: Execute the rollback in a speculative sandbox; confirm clean baseline restoration and zero uncompensated side effects.
+    * `decide`: Return `AutoCommit`, `AutoCommitWithNotice`, `RouteToApproval`, or `Block` based on autonomy ladder tier (`Shadow`, `Supervised`, `Autonomous`).
+  * Wired CLI subcommand `cicatrix reversibility <eval|classify|plan|validate>` and MCP tool `cicatrix_verify_reversibility`.
 * [ ] **Milestone 3.2: Synthetic Canary Tripwire Registry (`crm-core-tripwire`)**
   * Seed synthetic regression entries (`tripwire_canaries`) in the database with known sentinel markers.
   * Implement `tripwire_touches` audit logging.

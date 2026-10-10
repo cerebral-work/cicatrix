@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use crate::branch::{validate_snapshot_id, BranchManager};
 use crate::gitf::{filter_as_of, filter_by_frontier};
 use crate::mcp::protocol::McpToolDefinition;
+use crate::reversibility::{AutonomyTier, ReversibilityPipeline};
 use crate::store::sqlite::validate_never_zero_value;
 use crate::store::{BugFact, Frontier, SqliteStore, StochasticSpec};
 use crate::workflow::audit::{AuditInput, AuditReport};
@@ -211,6 +212,30 @@ pub fn mcp_tools() -> Vec<McpToolDefinition> {
                 "required": ["exec_id", "verdict", "idempotency_key"]
             }),
         },
+        McpToolDefinition {
+            name: "cicatrix_verify_reversibility".to_string(),
+            description: "Evaluate reversibility of a unified git diff through the 4-stage Wheelhorse pipeline (classify, plan, validate, decide).".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "diff": {
+                        "type": "string",
+                        "description": "Unified git diff patch string to evaluate"
+                    },
+                    "tier": {
+                        "type": "string",
+                        "enum": ["shadow", "supervised", "autonomous"],
+                        "description": "Autonomy tier for decision policy (default: supervised)"
+                    },
+                    "stage": {
+                        "type": "string",
+                        "enum": ["eval", "classify", "plan", "validate"],
+                        "description": "Pipeline evaluation stage to return (default: eval)"
+                    }
+                },
+                "required": ["diff"]
+            }),
+        },
     ]
 }
 
@@ -302,6 +327,7 @@ pub async fn execute_tool(name: &str, args: &Value) -> Result<Value, ToolExecuti
         "cicatrix_start_workflow" => handle_start_workflow(args).await,
         "cicatrix_workflow_status" => handle_workflow_status(args),
         "cicatrix_submit_signal" => handle_submit_signal(args).await,
+        "cicatrix_verify_reversibility" => handle_verify_reversibility(args),
         other => Err(ToolExecutionError::Client(format!(
             "unknown tool `{other}`"
         ))),
@@ -723,6 +749,66 @@ async fn handle_submit_signal(args: &Value) -> Result<Value, ToolExecutionError>
     })
 }
 
+fn handle_verify_reversibility(args: &Value) -> Result<Value, ToolExecutionError> {
+    let diff = args.get("diff").and_then(Value::as_str).ok_or_else(|| {
+        ToolExecutionError::Client("missing required parameter `diff`".to_string())
+    })?;
+
+    if diff.trim().is_empty() {
+        return Err(ToolExecutionError::Client(
+            "parameter `diff` cannot be empty".to_string(),
+        ));
+    }
+
+    let tier_str = args
+        .get("tier")
+        .and_then(Value::as_str)
+        .unwrap_or("supervised");
+    let tier: AutonomyTier = tier_str
+        .parse()
+        .map_err(|e| ToolExecutionError::Client(format!("invalid `tier` parameter: {e}")))?;
+
+    let stage = args.get("stage").and_then(Value::as_str).unwrap_or("eval");
+    let pipeline = ReversibilityPipeline::new(tier);
+
+    match stage {
+        "classify" => {
+            let res = pipeline.classify(diff).map_err(|e| {
+                ToolExecutionError::Internal(format!("reversibility classification failed: {e}"))
+            })?;
+            serde_json::to_value(res).map_err(|e| {
+                ToolExecutionError::Internal(format!("failed to serialize classification: {e}"))
+            })
+        }
+        "plan" => {
+            let res = pipeline.plan(diff).map_err(|e| {
+                ToolExecutionError::Internal(format!("reversibility plan generation failed: {e}"))
+            })?;
+            serde_json::to_value(res)
+                .map_err(|e| ToolExecutionError::Internal(format!("failed to serialize plan: {e}")))
+        }
+        "validate" => {
+            let res = pipeline.validate(diff).map_err(|e| {
+                ToolExecutionError::Internal(format!("reversibility validation failed: {e}"))
+            })?;
+            serde_json::to_value(res).map_err(|e| {
+                ToolExecutionError::Internal(format!("failed to serialize validation: {e}"))
+            })
+        }
+        "eval" | "evaluate" => {
+            let res = pipeline.evaluate(diff).map_err(|e| {
+                ToolExecutionError::Internal(format!("reversibility evaluation failed: {e}"))
+            })?;
+            serde_json::to_value(res).map_err(|e| {
+                ToolExecutionError::Internal(format!("failed to serialize evaluation report: {e}"))
+            })
+        }
+        other => Err(ToolExecutionError::Client(format!(
+            "invalid `stage` `{other}`; expected: eval, classify, plan, or validate"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,7 +816,7 @@ mod tests {
     #[test]
     fn test_mcp_tools_list_completeness() {
         let tools = mcp_tools();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"cicatrix_query_known_bugs"));
         assert!(names.contains(&"cicatrix_verify_diff"));
@@ -738,6 +824,30 @@ mod tests {
         assert!(names.contains(&"cicatrix_start_workflow"));
         assert!(names.contains(&"cicatrix_workflow_status"));
         assert!(names.contains(&"cicatrix_submit_signal"));
+        assert!(names.contains(&"cicatrix_verify_reversibility"));
+    }
+
+    #[test]
+    fn test_handle_verify_reversibility() {
+        let diff = r#"
+diff --git a/tests/test_foo.rs b/tests/test_foo.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tests/test_foo.rs
+@@ -0,0 +1,3 @@
++#[test]
++fn test_smoke() {}
+"#;
+        let args = json!({
+            "diff": diff,
+            "tier": "autonomous",
+            "stage": "eval"
+        });
+        let res = handle_verify_reversibility(&args).expect("tool execution should succeed");
+        assert_eq!(res["verdict"]["verdict"], "auto_commit");
+        assert_eq!(res["action_class"]["type"], "reversible_additive");
+        assert_eq!(res["touched_files"], json!(["tests/test_foo.rs"]));
     }
 
     #[test]

@@ -396,13 +396,24 @@ fn cmd_query(rest: &[String]) -> ExitCode {
             eprintln!("cicatrix query: tripwire intrusion detected: {e}");
             return ExitCode::FAILURE;
         }
-        let bridge = reverie::ReverieBridge::from_env();
-        match bridge.touches_known_bug(&files) {
-            Ok(h) => h,
-            Err(e) => {
-                let masked = crate::masking::MaskedError::internal(format!("{e}"));
-                eprintln!("{}", masked.to_cli_string("cicatrix query"));
-                return ExitCode::FAILURE;
+        if store.has_reverie() {
+            let bridge = reverie::ReverieBridge::from_env();
+            match bridge.touches_known_bug(&files) {
+                Ok(h) => h,
+                Err(e) => {
+                    let masked = crate::masking::MaskedError::internal(format!("{e}"));
+                    eprintln!("{}", masked.to_cli_string("cicatrix query"));
+                    return ExitCode::FAILURE;
+                }
+            }
+        } else {
+            match store.touches_known_bug(&files) {
+                Ok(h) => h,
+                Err(e) => {
+                    let masked = crate::masking::MaskedError::internal(format!("{e}"));
+                    eprintln!("{}", masked.to_cli_string("cicatrix query"));
+                    return ExitCode::FAILURE;
+                }
             }
         }
     };

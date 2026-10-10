@@ -2823,7 +2823,11 @@ fn test_query_soma_block_and_json_format_cli() {
         &["record", "docs/bugs/grounded/BUG_EMBED_EMPTY_INPUT_400.md"],
         &envs,
     );
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "record failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // 1. --format soma-block
     let out_block = run_with_env(
@@ -2835,7 +2839,11 @@ fn test_query_soma_block_and_json_format_cli() {
         ],
         &envs,
     );
-    assert!(out_block.status.success());
+    assert!(
+        out_block.status.success(),
+        "query soma-block failed: {:?}",
+        String::from_utf8_lossy(&out_block.stderr)
+    );
     let stdout_block = String::from_utf8_lossy(&out_block.stdout);
     assert!(stdout_block.contains("<known-bugs>"));
     assert!(stdout_block.contains("BUG_EMBED_EMPTY_INPUT_400"));
@@ -2851,7 +2859,11 @@ fn test_query_soma_block_and_json_format_cli() {
         ],
         &envs,
     );
-    assert!(out_json.status.success());
+    assert!(
+        out_json.status.success(),
+        "query json failed: {:?}",
+        String::from_utf8_lossy(&out_json.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out_json.stdout).expect("valid json");
     let arr = v.as_array().expect("array of facts");
     assert_eq!(arr.len(), 1);

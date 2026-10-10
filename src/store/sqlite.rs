@@ -218,6 +218,16 @@ impl SqliteStore {
         self.db_path.as_deref()
     }
 
+    /// Reference to the underlying SQLite connection.
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Mutable reference to the underlying SQLite connection.
+    pub fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
     /// Construct `SqliteStore` from environment settings.
     /// Uses `CICATRIX_DB_PATH` (or `~/.cicatrix/cicatrix.db`).
     /// Configures `ReverieBridge` unless `CICATRIX_NO_REVERIE=1` or `CICATRIX_OFFLINE=1`.
@@ -491,6 +501,58 @@ impl SqliteStore {
         }
         Ok(facts)
     }
+
+    /// Retrieve all stored regression bug facts ordered by ID.
+    pub fn all_facts(&self) -> io::Result<Vec<BugFact>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM bug_facts ORDER BY id ASC;")
+            .map_err(sqlite_to_io)?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(sqlite_to_io)?;
+        let mut facts = Vec::new();
+        for id_res in ids {
+            let id = id_res.map_err(sqlite_to_io)?;
+            if let Some(fact) = self.get_fact(&id)? {
+                facts.push(fact);
+            }
+        }
+        Ok(facts)
+    }
+
+    /// Retrieve all regression bug fact IDs ordered by ID.
+    pub fn all_fact_ids(&self) -> io::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM bug_facts ORDER BY id ASC;")
+            .map_err(sqlite_to_io)?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(sqlite_to_io)?;
+        let mut result = Vec::new();
+        for id_res in ids {
+            result.push(id_res.map_err(sqlite_to_io)?);
+        }
+        Ok(result)
+    }
+
+    /// Atomically copy the current database state to `target` using SQLite `VACUUM INTO ?1`.
+    pub fn vacuum_into(&self, target: impl AsRef<Path>) -> io::Result<()> {
+        let path = target.as_ref();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let path_str = path.to_str().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "path is not valid unicode")
+        })?;
+        self.conn
+            .execute("VACUUM INTO ?1;", rusqlite::params![path_str])
+            .map_err(sqlite_to_io)?;
+        Ok(())
+    }
 }
 
 impl BugStore for SqliteStore {
@@ -753,5 +815,71 @@ mod tests {
             count, 1,
             "harvest_executions table must coexist with cicatrix schema"
         );
+    }
+
+    #[test]
+    fn all_facts_and_all_fact_ids_retrieval() {
+        let mut store = SqliteStore::open_in_memory().expect("open store");
+        assert!(store.all_facts().expect("all facts empty").is_empty());
+        assert!(store.all_fact_ids().expect("all fact ids empty").is_empty());
+
+        let mut fact1 = sample_fact();
+        fact1.id = "BUG_ALPHA".into();
+        let mut fact2 = sample_fact();
+        fact2.id = "BUG_BETA".into();
+
+        store.record_local(&fact2).expect("record beta");
+        store.record_local(&fact1).expect("record alpha");
+
+        let ids = store.all_fact_ids().expect("all fact ids");
+        assert_eq!(ids, vec!["BUG_ALPHA", "BUG_BETA"]);
+
+        let facts = store.all_facts().expect("all facts");
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].id, "BUG_ALPHA");
+        assert_eq!(facts[1].id, "BUG_BETA");
+    }
+
+    #[test]
+    fn vacuum_into_creates_valid_and_isolated_database_copy() {
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let target_dir = tempfile::tempdir().expect("temp dir");
+        let target_path = target_dir.path().join("copy.db");
+
+        let mut store = SqliteStore::open(tmp.path()).expect("open initial store");
+        store.record_local(&sample_fact()).expect("record fact");
+
+        store.vacuum_into(&target_path).expect("vacuum into copy");
+        assert!(target_path.exists());
+
+        let copy_store = SqliteStore::open(&target_path).expect("open copy store");
+        let fact = copy_store
+            .get_fact("BUG_TEST_101")
+            .expect("query fact from copy")
+            .expect("fact exists in copy");
+        assert_eq!(fact.id, "BUG_TEST_101");
+
+        // Mutating the copy does not affect the original
+        let mut copy_store = copy_store;
+        let mut new_fact = sample_fact();
+        new_fact.id = "BUG_ONLY_IN_COPY".into();
+        copy_store.record_local(&new_fact).expect("record to copy");
+
+        assert!(copy_store.get_fact("BUG_ONLY_IN_COPY").unwrap().is_some());
+        assert!(store.get_fact("BUG_ONLY_IN_COPY").unwrap().is_none());
+    }
+
+    #[test]
+    fn branch_snapshots_table_exists() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='branch_snapshots';",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query branch_snapshots");
+        assert_eq!(count, 1, "branch_snapshots table must exist in schema");
     }
 }

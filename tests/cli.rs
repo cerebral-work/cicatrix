@@ -532,3 +532,356 @@ fn query_frontier_missing_arg_is_usage_error() {
         "stderr: {stderr}"
     );
 }
+
+// === CER-2755 P1.3: branch snapshot & forking interface ===
+
+fn branch_test_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("cicatrix_branchcli_{tag}_{}", std::process::id()));
+    fs::remove_dir_all(&dir).ok();
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn run_branch_cmd(db_path: &Path, args: &[&str]) -> Output {
+    Command::new(BIN)
+        .args(args)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("CICATRIX_DB_PATH", db_path)
+        .env("CICATRIX_NO_REVERIE", "1")
+        .env("REVERIE_URL", "http://127.0.0.1:1")
+        .output()
+        .expect("failed to spawn cicatrix binary")
+}
+
+fn run_branch_cmd_with_env(db_path: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(BIN);
+    cmd.args(args)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("CICATRIX_DB_PATH", db_path)
+        .env("CICATRIX_NO_REVERIE", "1")
+        .env("REVERIE_URL", "http://127.0.0.1:1");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("failed to spawn cicatrix binary")
+}
+
+#[test]
+fn branch_usage_errors() {
+    let out = run(&["branch"]);
+    assert!(!out.status.success(), "bare branch must exit non-zero");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("usage: cicatrix branch"), "stderr: {err}");
+
+    let out = run(&["branch", "bogus"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("unknown subcommand `bogus`") || err.contains("usage: cicatrix branch"),
+        "stderr: {err}"
+    );
+
+    let out = run(&["branch", "fork"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("usage: cicatrix branch fork"), "stderr: {err}");
+
+    let out = run(&["branch", "fork", "id", "--from"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--from needs a <base>"), "stderr: {err}");
+
+    let out = run(&["branch", "fork", "id", "--frontier"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--frontier needs a <vector>"), "stderr: {err}");
+
+    let out = run(&["branch", "fork", "id", "--unknown"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown flag"), "stderr: {err}");
+
+    let out = run(&["branch", "drop"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("usage: cicatrix branch drop"), "stderr: {err}");
+
+    let out = run(&["branch", "settle"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("usage: cicatrix branch settle"),
+        "stderr: {err}"
+    );
+
+    let out = run(&["branch", "list", "extra"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("usage: cicatrix branch list"), "stderr: {err}");
+
+    let out = run(&["branch", "path"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("usage: cicatrix branch path"), "stderr: {err}");
+
+    let out = run(&["record", "--branch"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--branch needs a <snapshot_id>"),
+        "stderr: {err}"
+    );
+
+    let out = run(&["query", "src/lib.rs", "--branch"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--branch needs a <snapshot_id>"),
+        "stderr: {err}"
+    );
+}
+
+#[test]
+fn branch_snapshot_id_validation_errors() {
+    let out = run(&["branch", "fork", "../traversal"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("path traversal detected") || err.contains("invalid characters"),
+        "stderr: {err}"
+    );
+
+    let out = run(&["branch", "fork", "invalid/slash"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("path traversal detected") || err.contains("invalid characters"),
+        "stderr: {err}"
+    );
+
+    let out = run(&["branch", "fork", "with space"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("invalid characters"), "stderr: {err}");
+}
+
+#[test]
+fn branch_lifecycle_and_nested_fork_cli() {
+    let dir = branch_test_dir("lifecycle");
+    let db_path = dir.join("cicatrix.db");
+
+    let out = run_branch_cmd(&db_path, &["branch", "list"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no active branch snapshots"),
+        "stdout: {stdout}"
+    );
+
+    let out = run_branch_cmd(&db_path, &["branch", "fork", "b1", "--frontier", "nodeA:1"]);
+    assert!(
+        out.status.success(),
+        "fork b1 failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("forked branch snapshot `b1`"),
+        "stdout: {stdout}"
+    );
+
+    let out = run_branch_cmd(&db_path, &["branch", "path", "b1"]);
+    assert!(out.status.success());
+    let b1_path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let b1_path = Path::new(&b1_path_str);
+    assert!(
+        b1_path.exists(),
+        "branch db path does not exist: {b1_path_str}"
+    );
+
+    let out = run_branch_cmd(&db_path, &["branch", "fork", "b1"]);
+    assert!(!out.status.success(), "duplicate fork should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("already exists"), "stderr: {stderr}");
+
+    let out = run_branch_cmd(
+        &db_path,
+        &[
+            "branch",
+            "fork",
+            "b2",
+            "--from",
+            "b1",
+            "--frontier",
+            "nodeB:2",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "fork b2 failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("forked branch snapshot `b2`"),
+        "stdout: {stdout}"
+    );
+
+    let out = run_branch_cmd(&db_path, &["branch", "list"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("b1"), "list missing b1: {stdout}");
+    assert!(stdout.contains("b2"), "list missing b2: {stdout}");
+    assert!(
+        stdout.contains("nodeA:1"),
+        "list missing frontier nodeA:1: {stdout}"
+    );
+    assert!(
+        stdout.contains("nodeB:2"),
+        "list missing frontier nodeB:2: {stdout}"
+    );
+
+    let out = run_branch_cmd(&db_path, &["branch", "drop", "b2"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("dropped branch snapshot `b2`"),
+        "stdout: {stdout}"
+    );
+
+    let out = run_branch_cmd(&db_path, &["branch", "drop", "b1"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("dropped branch snapshot `b1`"),
+        "stdout: {stdout}"
+    );
+    assert!(!b1_path.exists(), "dropped db still exists on disk");
+
+    let out = run_branch_cmd(&db_path, &["branch", "drop", "b1"]);
+    assert!(!out.status.success(), "second drop should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not found"), "stderr: {stderr}");
+
+    let out = run_branch_cmd(&db_path, &["branch", "list"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no active branch snapshots"),
+        "stdout: {stdout}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn branch_record_query_isolation_and_settle() {
+    let dir = branch_test_dir("settle");
+    let db_path = dir.join("cicatrix.db");
+
+    let out = run_branch_cmd(&db_path, &["branch", "fork", "feat-wt"]);
+    assert!(
+        out.status.success(),
+        "fork failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = run_branch_cmd(
+        &db_path,
+        &[
+            "record",
+            "docs/bugs/grounded/BUG_EMBED_EMPTY_INPUT_400.md",
+            "--branch",
+            "feat-wt",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "record to branch failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("recorded BUG_EMBED_EMPTY_INPUT_400 → branch feat-wt (sqlite)"),
+        "stdout: {stdout}"
+    );
+
+    let out = run_branch_cmd(
+        &db_path,
+        &[
+            "query",
+            "crates/reverie-store/src/embed.rs",
+            "--branch",
+            "feat-wt",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "branch query failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("BUG_EMBED_EMPTY_INPUT_400: known-bug surface"),
+        "stdout: {stdout}"
+    );
+
+    let out = run_branch_cmd_with_env(
+        &db_path,
+        &["query", "crates/reverie-store/src/embed.rs"],
+        &[("CICATRIX_BRANCH", "feat-wt")],
+    );
+    assert!(
+        out.status.success(),
+        "CICATRIX_BRANCH query failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("BUG_EMBED_EMPTY_INPUT_400: known-bug surface"),
+        "stdout: {stdout}"
+    );
+
+    let out = run_branch_cmd(
+        &db_path,
+        &[
+            "query",
+            "crates/unrelated/src/lib.rs",
+            "--branch",
+            "feat-wt",
+        ],
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no known-bug surface touched"),
+        "stdout: {stdout}"
+    );
+
+    let out = run_branch_cmd(&db_path, &["branch", "settle", "feat-wt"]);
+    assert!(
+        out.status.success(),
+        "settle failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("settled branch snapshot `feat-wt`: merged 1 fact(s)"),
+        "stdout: {stdout}"
+    );
+
+    let out = run_branch_cmd(&db_path, &["branch", "list"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("no active branch snapshots"),
+        "stdout: {stdout}"
+    );
+
+    let out = run_branch_cmd(&db_path, &["branch", "settle", "feat-wt"]);
+    assert!(!out.status.success(), "second settle should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not found"), "stderr: {stderr}");
+
+    fs::remove_dir_all(&dir).ok();
+}

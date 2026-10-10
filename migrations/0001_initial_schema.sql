@@ -49,3 +49,14 @@ CREATE TABLE IF NOT EXISTS bug_occurrences (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bug_occurrences_bug_id ON bug_occurrences(bug_id);
+
+CREATE TABLE IF NOT EXISTS branch_snapshots (
+    snapshot_id TEXT PRIMARY KEY NOT NULL,
+    base_frontier TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    db_path TEXT NOT NULL,
+    CHECK (length(trim(snapshot_id)) > 0),
+    CHECK (length(trim(db_path)) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_branch_snapshots_created_at ON branch_snapshots(created_at);

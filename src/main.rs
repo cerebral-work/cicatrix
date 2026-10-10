@@ -1,4 +1,5 @@
 //! cicatrix — regression-memory + convention-drift CLI.
+pub mod branch;
 mod bug_md;
 mod corpus;
 mod drift;
@@ -22,15 +23,18 @@ fn main() -> ExitCode {
         "record" => cmd_record(&args[1..]),
         // "does this diff touch a known-bug surface?" — query reverie, optionally as-of a commit
         "query" => cmd_query(&args[1..]),
+        // branch snapshot & forking interface for agent worktrees (CER-2755)
+        "branch" => cmd_branch(&args[1..]),
         // regenerate the CLAUDE.md meta-pattern block from grounded facts; diff (or --apply write)
         "project-meta" => cmd_project_meta(&args[1..]),
         // print newest scan path (bare) or regenerate the convention-drift table (`drift scan`)
         "drift" => cmd_drift(&args[1..]),
         _ => {
             eprintln!(
-                "usage: cicatrix <inject [--target <path>] | record [<BUG_*.md>...] | \
-                 query <changed-file>... [--as-of <commit>] [--frontier <vector>] | project-meta [--apply] | \
-                 drift [scan [--repo <path>]]>"
+                "usage: cicatrix <inject [--target <path>] | record [<BUG_*.md>...] [--branch <id>] | \
+                 query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>] | \
+                 branch <fork <id> [--from <base>] [--frontier <vec>] | drop <id> | settle <id> | list | path <id>> | \
+                 project-meta [--apply] | drift [scan [--repo <path>]]>"
             );
             ExitCode::FAILURE
         }
@@ -73,17 +77,53 @@ fn cmd_inject(rest: &[String]) -> ExitCode {
 }
 
 /// `record [<BUG_*.md>...]` — project the given bug-docs (or the whole grounded corpus, if none
-/// given) into reverie. Only grounded facts may be projected: an explicit path under the observed
-/// tier is refused before anything is projected (observed facts are ungrounded). The markdown is
-/// the source of truth; this writes the regenerable projection.
+fn open_branch_store(branch_id: &str) -> Result<store::SqliteStore, branch::BranchError> {
+    branch::validate_snapshot_id(branch_id)?;
+    let trunk_store = store::SqliteStore::open_default()?;
+    let manager = branch::BranchManager::new(trunk_store)?;
+    let path = manager.branch_path(branch_id)?;
+    let branch_store = store::SqliteStore::open(path)?;
+    Ok(branch_store)
+}
+
+/// `record [<BUG_*.md>...] [--branch <id>]` — project the given bug-docs (or the whole grounded corpus, if none
+/// given) into reverie (or isolated branch database if `--branch` or `CICATRIX_BRANCH` is set).
+/// Only grounded facts may be projected: an explicit path under the observed tier is refused before
+/// anything is projected (observed facts are ungrounded). The markdown is the source of truth;
+/// this writes the regenerable projection.
 fn cmd_record(rest: &[String]) -> ExitCode {
-    let paths: Vec<&String> = rest.iter().filter(|a| !a.starts_with("--")).collect();
+    let mut paths = Vec::new();
+    let mut branch_arg: Option<String> = None;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--branch" => match it.next() {
+                Some(b) => branch_arg = Some(b.clone()),
+                None => {
+                    eprintln!("cicatrix record: --branch needs a <snapshot_id>");
+                    return ExitCode::FAILURE;
+                }
+            },
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix record: unknown flag {flag}");
+                return ExitCode::FAILURE;
+            }
+            path => paths.push(path.to_string()),
+        }
+    }
+
+    let branch = branch_arg.or_else(|| {
+        std::env::var("CICATRIX_BRANCH")
+            .ok()
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())
+    });
 
     // Poison-the-well gate: refuse any explicit input under the observed (ungrounded) tier
     // BEFORE projecting anything.
     let observed_dir = corpus::resolve_dir(corpus::Tier::Observed);
     for p in &paths {
-        if path_is_under(Path::new(p.as_str()), &observed_dir) {
+        if path_is_under(Path::new(p), &observed_dir) {
             eprintln!("observed facts are ungrounded; promote to grounded first");
             return ExitCode::FAILURE;
         }
@@ -94,7 +134,7 @@ fn cmd_record(rest: &[String]) -> ExitCode {
     } else {
         paths
             .iter()
-            .map(|p| bug_md::parse_file(Path::new(p.as_str())))
+            .map(|p| bug_md::parse_file(Path::new(p)))
             .collect()
     };
     let facts = match facts {
@@ -109,42 +149,73 @@ fn cmd_record(rest: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut store = match store::SqliteStore::from_env() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("cicatrix record: failed to initialize sqlite database: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let mut recorded = 0usize;
-    for f in &facts {
-        match store.record(f) {
-            Ok(()) => {
-                if store.has_reverie() {
-                    println!("recorded {} → reverie (project=cicatrix)", f.id);
-                } else {
-                    println!("recorded {} → sqlite (project=cicatrix)", f.id);
-                }
-                recorded += 1;
+    if let Some(branch_id) = branch {
+        let mut store = match open_branch_store(&branch_id) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("cicatrix record: failed to open branch database `{branch_id}`: {e}");
+                return ExitCode::FAILURE;
             }
-            Err(e) => eprintln!("cicatrix record: {} failed: {e}", f.id),
+        };
+        let mut recorded = 0usize;
+        for f in &facts {
+            match store.record(f) {
+                Ok(()) => {
+                    println!("recorded {} → branch {} (sqlite)", f.id, branch_id);
+                    recorded += 1;
+                }
+                Err(e) => eprintln!("cicatrix record: {} failed: {e}", f.id),
+            }
         }
-    }
-    if recorded == facts.len() {
-        ExitCode::SUCCESS
+        if recorded == facts.len() {
+            ExitCode::SUCCESS
+        } else {
+            eprintln!(
+                "cicatrix record: {recorded}/{} recorded to branch",
+                facts.len()
+            );
+            ExitCode::FAILURE
+        }
     } else {
-        eprintln!("cicatrix record: {recorded}/{} projected", facts.len());
-        ExitCode::FAILURE
+        let mut store = match store::SqliteStore::from_env() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("cicatrix record: failed to initialize sqlite database: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let mut recorded = 0usize;
+        for f in &facts {
+            match store.record(f) {
+                Ok(()) => {
+                    if store.has_reverie() {
+                        println!("recorded {} → reverie (project=cicatrix)", f.id);
+                    } else {
+                        println!("recorded {} → sqlite (project=cicatrix)", f.id);
+                    }
+                    recorded += 1;
+                }
+                Err(e) => eprintln!("cicatrix record: {} failed: {e}", f.id),
+            }
+        }
+        if recorded == facts.len() {
+            ExitCode::SUCCESS
+        } else {
+            eprintln!("cicatrix record: {recorded}/{} projected", facts.len());
+            ExitCode::FAILURE
+        }
     }
 }
 
-/// `query <changed-file>... [--as-of <commit>] [--frontier <vector>]` — ask reverie which known-bug surfaces the changed
-/// files touch; with `--as-of`, keep only bugs fixed at or before `<commit>` (git-ancestry);
+/// `query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>]` —
+/// ask reverie (or branch database) which known-bug surfaces the changed files touch;
+/// with `--as-of`, keep only bugs fixed at or before `<commit>` (git-ancestry);
 /// with `--frontier`, keep only bugs causally dominated by the given version-vector frontier cut.
 fn cmd_query(rest: &[String]) -> ExitCode {
     let mut files = Vec::new();
     let mut as_of: Option<String> = None;
     let mut frontier_arg: Option<String> = None;
+    let mut branch_arg: Option<String> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -162,6 +233,13 @@ fn cmd_query(rest: &[String]) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
+            "--branch" => match it.next() {
+                Some(b) => branch_arg = Some(b.clone()),
+                None => {
+                    eprintln!("cicatrix query: --branch needs a <snapshot_id>");
+                    return ExitCode::FAILURE;
+                }
+            },
             flag if flag.starts_with("--") => {
                 eprintln!("cicatrix query: unknown flag {flag}");
                 return ExitCode::FAILURE;
@@ -171,10 +249,17 @@ fn cmd_query(rest: &[String]) -> ExitCode {
     }
     if files.is_empty() {
         eprintln!(
-            "usage: cicatrix query <changed-file>... [--as-of <commit>] [--frontier <vector>]"
+            "usage: cicatrix query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>]"
         );
         return ExitCode::FAILURE;
     }
+
+    let branch = branch_arg.or_else(|| {
+        std::env::var("CICATRIX_BRANCH")
+            .ok()
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())
+    });
 
     let parsed_frontier = if let Some(f_str) = &frontier_arg {
         match store::Frontier::parse(f_str) {
@@ -188,12 +273,29 @@ fn cmd_query(rest: &[String]) -> ExitCode {
         None
     };
 
-    let bridge = reverie::ReverieBridge::from_env();
-    let mut hits = match bridge.touches_known_bug(&files) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("cicatrix query: {e}");
-            return ExitCode::FAILURE;
+    let mut hits = if let Some(branch_id) = branch {
+        let branch_store = match open_branch_store(&branch_id) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("cicatrix query: failed to open branch database `{branch_id}`: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        match branch_store.touches_known_bug(&files) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("cicatrix query: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        let bridge = reverie::ReverieBridge::from_env();
+        match bridge.touches_known_bug(&files) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("cicatrix query: {e}");
+                return ExitCode::FAILURE;
+            }
         }
     };
 
@@ -231,6 +333,201 @@ fn cmd_query(rest: &[String]) -> ExitCode {
         println!("  guard: {} — don't reintroduce it", f.regression_test);
     }
     ExitCode::SUCCESS
+}
+
+/// `branch <fork <id> [--from <base>] [--frontier <vec>] | drop <id> | settle <id> | list | path <id>>` —
+/// snapshot and forking engine for agent worktrees and DeltaDB virtual threads.
+fn cmd_branch(rest: &[String]) -> ExitCode {
+    let sub = match rest.first().map(String::as_str) {
+        Some(s) => s,
+        None => {
+            eprintln!(
+                "usage: cicatrix branch <fork <id> [--from <base>] [--frontier <vec>] | drop <id> | settle <id> | list | path <id>>"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let trunk_store = match store::SqliteStore::from_env() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cicatrix branch: failed to open primary database: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut manager = match branch::BranchManager::new(trunk_store) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("cicatrix branch: failed to initialize branch manager: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match sub {
+        "fork" => {
+            let mut id: Option<String> = None;
+            let mut from: Option<String> = None;
+            let mut frontier: Option<String> = None;
+            let mut it = rest[1..].iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--from" => match it.next() {
+                        Some(f) => from = Some(f.clone()),
+                        None => {
+                            eprintln!("cicatrix branch fork: --from needs a <base>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--frontier" => match it.next() {
+                        Some(f) => frontier = Some(f.clone()),
+                        None => {
+                            eprintln!("cicatrix branch fork: --frontier needs a <vector>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    flag if flag.starts_with("--") => {
+                        eprintln!("cicatrix branch fork: unknown flag {flag}");
+                        return ExitCode::FAILURE;
+                    }
+                    val => {
+                        if id.is_none() {
+                            id = Some(val.to_string());
+                        } else {
+                            eprintln!("cicatrix branch fork: unexpected extra argument `{val}`");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                }
+            }
+            let snapshot_id = match id {
+                Some(i) => i,
+                None => {
+                    eprintln!(
+                        "usage: cicatrix branch fork <snapshot_id> [--from <base>] [--frontier <vector>]"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            match manager.fork(&snapshot_id, from.as_deref(), frontier.as_deref()) {
+                Ok(snapshot) => {
+                    println!(
+                        "forked branch snapshot `{}` ({})",
+                        snapshot.snapshot_id,
+                        snapshot.db_path.display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix branch fork: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "drop" => {
+            if rest.len() != 2 {
+                eprintln!("usage: cicatrix branch drop <snapshot_id>");
+                return ExitCode::FAILURE;
+            }
+            let snapshot_id = &rest[1];
+            match manager.drop_snapshot(snapshot_id) {
+                Ok(path) => {
+                    println!(
+                        "dropped branch snapshot `{}` ({})",
+                        snapshot_id,
+                        path.display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix branch drop: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "settle" => {
+            if rest.len() != 2 {
+                eprintln!("usage: cicatrix branch settle <snapshot_id>");
+                return ExitCode::FAILURE;
+            }
+            let snapshot_id = &rest[1];
+            match manager.settle(snapshot_id) {
+                Ok(report) => {
+                    println!(
+                        "settled branch snapshot `{}`: merged {} fact(s)",
+                        report.snapshot_id, report.merged_facts
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix branch settle: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "list" => {
+            if rest.len() > 1 {
+                eprintln!("usage: cicatrix branch list");
+                return ExitCode::FAILURE;
+            }
+            match manager.list() {
+                Ok(snapshots) => {
+                    if snapshots.is_empty() {
+                        println!("no active branch snapshots");
+                    } else {
+                        for snap in snapshots {
+                            if let Some(f) = &snap.base_frontier {
+                                println!(
+                                    "{}\t{}\t{}\t{}",
+                                    snap.snapshot_id,
+                                    snap.created_at,
+                                    f,
+                                    snap.db_path.display()
+                                );
+                            } else {
+                                println!(
+                                    "{}\t{}\t{}",
+                                    snap.snapshot_id,
+                                    snap.created_at,
+                                    snap.db_path.display()
+                                );
+                            }
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix branch list: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "path" => {
+            if rest.len() != 2 {
+                eprintln!("usage: cicatrix branch path <snapshot_id>");
+                return ExitCode::FAILURE;
+            }
+            let snapshot_id = &rest[1];
+            match manager.branch_path(snapshot_id) {
+                Ok(path) => {
+                    println!("{}", path.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix branch path: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        other => {
+            eprintln!("cicatrix branch: unknown subcommand `{other}`");
+            eprintln!(
+                "usage: cicatrix branch <fork <id> [--from <base>] [--frontier <vec>] | drop <id> | settle <id> | list | path <id>>"
+            );
+            ExitCode::FAILURE
+        }
+    }
 }
 
 const MARKERS_JSON: &str = "markers.json";

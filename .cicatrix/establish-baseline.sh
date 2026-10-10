@@ -14,7 +14,7 @@ cd "$REPO_ROOT"
 MARKER="$REPO_ROOT/.cicatrix/baseline-green"
 mkdir -p "$REPO_ROOT/.cicatrix"
 
-if ! test_out="$(cargo test --quiet 2>&1)"; then
+if ! test_out="$(cargo test -j 2 --quiet 2>&1)"; then
   rm -f "$MARKER"
   printf '%s\n' "$test_out" >&2
   echo "cicatrix: baseline RED — suite failed; marker NOT written (stale one removed)." >&2

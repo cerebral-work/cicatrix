@@ -1886,3 +1886,176 @@ diff --git a/src/token.rs b/src/token.rs
     assert_eq!(v["canary_id"], "TRIPWIRE_CANARY_AUTH_TOKEN");
     assert_eq!(v["cortex_notified"], true);
 }
+
+#[test]
+fn unified_error_masking_rest_mcp_and_cli() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    // Pick a free random port
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let bind_addr = format!("127.0.0.1:{port}");
+
+    let mut child = Command::new(BIN)
+        .arg("serve")
+        .arg("--mcp")
+        .arg("--bind")
+        .arg(&bind_addr)
+        .spawn()
+        .expect("failed to spawn cicatrix serve --mcp");
+
+    // Wait until server is reachable
+    let mut connected = false;
+    for _ in 0..50 {
+        if let Ok(mut stream) = TcpStream::connect(&bind_addr) {
+            let req =
+                format!("GET /health HTTP/1.1\r\nHost: {bind_addr}\r\nConnection: close\r\n\r\n");
+            if stream.write_all(req.as_bytes()).is_ok() {
+                let mut res = String::new();
+                if stream.read_to_string(&mut res).is_ok() && res.contains("200 OK") {
+                    connected = true;
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(connected, "HTTP server did not become ready in time");
+
+    // 1. GET /api/v1/error/simulate_500: Assert 500 status, X-Correlation-Id header, and zero leaks
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let req = format!("GET /api/v1/error/simulate_500 HTTP/1.1\r\nHost: {bind_addr}\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(
+            res.contains("500 Internal Server Error"),
+            "Expected 500, got: {res}"
+        );
+        assert!(
+            res.contains("X-Correlation-Id: ref_"),
+            "Expected X-Correlation-Id header, got: {res}"
+        );
+        assert!(
+            res.contains("\"error\":\"internal_server_error\""),
+            "Expected internal_server_error, got: {res}"
+        );
+        assert!(
+            res.contains("internal server error (correlation: ref_"),
+            "Expected correlation in body, got: {res}"
+        );
+
+        // Invariant: zero path or credential leaks in body
+        let body_start = res.find("\r\n\r\n").expect("end of headers") + 4;
+        let body = &res[body_start..];
+        assert!(!body.contains("/home/"), "Leaked /home/ in body: {body}");
+        assert!(!body.contains("/tmp/"), "Leaked /tmp/ in body: {body}");
+        assert!(
+            !body.contains("secret123"),
+            "Leaked secret123 in body: {body}"
+        );
+        assert!(!body.contains("token="), "Leaked token in body: {body}");
+    }
+
+    // 2. POST /api/v1/query with malformed JSON: Assert 400 Bad Request client error
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let bad_payload = "{ not valid json";
+        let req = format!(
+            "POST /api/v1/query HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            bad_payload.len(),
+            bad_payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("400 Bad Request"), "Expected 400, got: {res}");
+        assert!(
+            res.contains("\"error\":\"bad_request\""),
+            "Expected bad_request, got: {res}"
+        );
+    }
+
+    // 3. POST /api/v1/tripwire/check with valid payload: Assert 200 OK
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let payload = serde_json::json!({
+            "target": "src/normal.rs",
+            "actor": "operator"
+        })
+        .to_string();
+        let req = format!(
+            "POST /api/v1/tripwire/check HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "Expected 200 OK, got: {res}");
+        assert!(
+            res.contains("\"verdict\":\"permitted\""),
+            "Expected verdict permitted, got: {res}"
+        );
+    }
+
+    // 4. POST /mcp with invalid JSON: Assert 400 Bad Request with sanitized message
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let bad_mcp = "{ invalid mcp json";
+        let req = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            bad_mcp.len(),
+            bad_mcp
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("400 Bad Request"), "Expected 400, got: {res}");
+        assert!(
+            res.contains("parse error"),
+            "Expected parse error, got: {res}"
+        );
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // 5. CLI Error Masking: offline query produces masked correlation ID on stderr
+    let out = run_offline(&["query", "crates/reverie-store/src/embed.rs"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("correlation: ref_"),
+        "CLI stderr should contain masked correlation: {stderr}"
+    );
+    assert!(
+        stderr.contains("[cicatrix] internal error [ref_"),
+        "CLI stderr should log correlation tag: {stderr}"
+    );
+    assert!(
+        !stderr.contains("password"),
+        "CLI stderr must not leak credentials"
+    );
+}

@@ -23,7 +23,9 @@ pub async fn handle_json_rpc(req_val: Value) -> Option<Value> {
             return Some(
                 serde_json::to_value(JsonRpcResponse::error(
                     Value::Null,
-                    JsonRpcError::invalid_request(format!("invalid JSON-RPC request: {e}")),
+                    JsonRpcError::invalid_request(crate::masking::sanitize_all(&format!(
+                        "invalid JSON-RPC request: {e}"
+                    ))),
                 ))
                 .unwrap_or(Value::Null),
             );
@@ -66,7 +68,7 @@ pub async fn handle_json_rpc(req_val: Value) -> Option<Value> {
                         Some(serde_json::to_value(mcp_res).unwrap_or(Value::Null))
                     }
                     Err(ToolExecutionError::Client(msg)) => {
-                        let mcp_res = McpToolCallResult::error(msg);
+                        let mcp_res = McpToolCallResult::error(crate::masking::sanitize_all(&msg));
                         Some(serde_json::to_value(mcp_res).unwrap_or(Value::Null))
                     }
                     Err(ToolExecutionError::Internal(details)) => {
@@ -166,6 +168,90 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
+async fn send_http_response(
+    stream: &mut TcpStream,
+    status_code: u16,
+    reason: &str,
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+    body: &[u8],
+) -> io::Result<()> {
+    let mut header_str = format!(
+        "HTTP/1.1 {status_code} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (k, v) in extra_headers {
+        header_str.push_str(&format!("{k}: {v}\r\n"));
+    }
+    header_str.push_str("\r\n");
+    stream.write_all(header_str.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await?;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
+async fn handle_rest_tool_call(
+    tool_name: &str,
+    body: &[u8],
+    stream: &mut TcpStream,
+) -> io::Result<()> {
+    let payload_val: Result<Value, _> = serde_json::from_slice(body);
+    let payload = match payload_val {
+        Ok(v) => v,
+        Err(e) => {
+            let masked = crate::masking::MaskedError::client(format!("invalid JSON payload: {e}"));
+            let (status, resp_body, _) = masked.to_http_response();
+            return send_http_response(
+                stream,
+                status,
+                "Bad Request",
+                "application/json",
+                &[],
+                resp_body.as_bytes(),
+            )
+            .await;
+        }
+    };
+
+    match execute_tool(tool_name, &payload).await {
+        Ok(res_val) => {
+            let res_bytes = serde_json::to_vec(&res_val).unwrap_or_default();
+            send_http_response(stream, 200, "OK", "application/json", &[], &res_bytes).await
+        }
+        Err(ToolExecutionError::Client(msg)) => {
+            let masked = crate::masking::MaskedError::client(msg);
+            let (status, resp_body, _) = masked.to_http_response();
+            send_http_response(
+                stream,
+                status,
+                "Bad Request",
+                "application/json",
+                &[],
+                resp_body.as_bytes(),
+            )
+            .await
+        }
+        Err(ToolExecutionError::Internal(details)) => {
+            let masked = crate::masking::MaskedError::internal(details);
+            let (status, resp_body, correlation_id) = masked.to_http_response();
+            let mut headers = Vec::new();
+            if let Some(ref ref_id) = correlation_id {
+                headers.push(("X-Correlation-Id", ref_id.as_str()));
+            }
+            send_http_response(
+                stream,
+                status,
+                "Internal Server Error",
+                "application/json",
+                &headers,
+                resp_body.as_bytes(),
+            )
+            .await
+        }
+    }
+}
+
 async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
     let mut buf = vec![0u8; 8192];
     let mut header_bytes = Vec::new();
@@ -212,14 +298,15 @@ async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
                         "version": env!("CARGO_PKG_VERSION"),
                     })
                     .to_string();
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        res_body.len(),
-                        res_body
-                    );
-                    stream.write_all(response.as_bytes()).await?;
-                    stream.flush().await?;
-                    let _ = stream.shutdown().await;
+                    send_http_response(
+                        &mut stream,
+                        200,
+                        "OK",
+                        "application/json",
+                        &[],
+                        res_body.as_bytes(),
+                    )
+                    .await?;
                     return Ok(());
                 }
                 ("GET", "/sse") => {
@@ -243,37 +330,79 @@ async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
                                 }
                                 None => "{}".to_string(),
                             };
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                res_body.len(),
-                                res_body
-                            );
-                            stream.write_all(response.as_bytes()).await?;
-                            stream.flush().await?;
-                            let _ = stream.shutdown().await;
+                            send_http_response(
+                                &mut stream,
+                                200,
+                                "OK",
+                                "application/json",
+                                &[],
+                                res_body.as_bytes(),
+                            )
+                            .await?;
                             return Ok(());
                         }
                         Err(e) => {
+                            let sanitized =
+                                crate::masking::sanitize_all(&format!("parse error: {e}"));
                             let err_body = json!({
                                 "jsonrpc": "2.0",
                                 "id": null,
                                 "error": {
                                     "code": crate::mcp::protocol::PARSE_ERROR,
-                                    "message": format!("parse error: {e}")
+                                    "message": sanitized
                                 }
                             })
                             .to_string();
-                            let response = format!(
-                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                err_body.len(),
-                                err_body
-                            );
-                            stream.write_all(response.as_bytes()).await?;
-                            stream.flush().await?;
-                            let _ = stream.shutdown().await;
+                            send_http_response(
+                                &mut stream,
+                                400,
+                                "Bad Request",
+                                "application/json",
+                                &[],
+                                err_body.as_bytes(),
+                            )
+                            .await?;
                             return Ok(());
                         }
                     }
+                }
+                // REST API Endpoints with Unified Error Masking
+                ("POST", "/api/v1/query") => {
+                    handle_rest_tool_call("cicatrix_query_known_bugs", &body, &mut stream).await?;
+                    return Ok(());
+                }
+                ("POST", "/api/v1/verify_diff") => {
+                    handle_rest_tool_call("cicatrix_verify_diff", &body, &mut stream).await?;
+                    return Ok(());
+                }
+                ("POST", "/api/v1/reversibility") => {
+                    handle_rest_tool_call("cicatrix_verify_reversibility", &body, &mut stream)
+                        .await?;
+                    return Ok(());
+                }
+                ("POST", "/api/v1/tripwire/check") => {
+                    handle_rest_tool_call("cicatrix_check_tripwire", &body, &mut stream).await?;
+                    return Ok(());
+                }
+                ("GET", "/api/v1/error/simulate_500") | ("POST", "/api/v1/error/simulate_500") => {
+                    let masked = crate::masking::MaskedError::internal(
+                        "simulated internal database error at /home/ctodie/db.sqlite with token=secret123"
+                    );
+                    let (status, resp_body, correlation_id) = masked.to_http_response();
+                    let mut headers = Vec::new();
+                    if let Some(ref ref_id) = correlation_id {
+                        headers.push(("X-Correlation-Id", ref_id.as_str()));
+                    }
+                    send_http_response(
+                        &mut stream,
+                        status,
+                        "Internal Server Error",
+                        "application/json",
+                        &headers,
+                        resp_body.as_bytes(),
+                    )
+                    .await?;
+                    return Ok(());
                 }
                 _ => {
                     let not_found =

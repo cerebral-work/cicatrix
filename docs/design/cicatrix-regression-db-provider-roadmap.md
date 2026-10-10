@@ -198,9 +198,11 @@ sequenceDiagram
   * Implemented `tripwire_touches` audit logging table to capture actor, action type, verdict, and notification status.
   * Enforced immediate fail-closed circuit breaking and Cortex security notifications (`cortex-msg send coordinator "security:canary-tripwire"`) upon unauthorized agent touch.
   * Added `cicatrix tripwire <list|check|touches|seed>` CLI command, guarded `cicatrix query` and `cicatrix reversibility`, and exposed `cicatrix_check_tripwire` MCP tool with fail-closed query/diff guards.
-* [ ] **Milestone 3.3: Unified Error Masking**
-  * Mask all 5xx internal server errors across CLI, REST, and MCP surfaces behind `ref_`-prefixed identifiers.
-  * Strip internal file paths and credentials from error responses.
+* [x] **Milestone 3.3: Unified Error Masking Policy (`CER-2761`)**
+  * Implemented zero-dependency error masking engine (`src/masking.rs`) with `ref_`-prefixed correlation IDs.
+  * Masked all 5xx internal server errors across CLI, REST HTTP, and MCP JSON-RPC behind generic client-safe messages while logging sanitized correlation details to stderr.
+  * Redacted all internal file paths (`/home/...`, `/tmp/...`, `/rustc/...`, `C:\Users\...`), stack traces, and sensitive credentials (API keys, bearer tokens, private keys, auth headers) in public responses.
+  * Provided REST HTTP error handling and simulation endpoints (`/api/v1/error/simulate_500`, `/api/v1/query`, `/api/v1/verify_diff`, `/api/v1/reversibility`, `/api/v1/tripwire/check`).
 
 ```mermaid
 flowchart LR

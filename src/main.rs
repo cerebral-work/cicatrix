@@ -6,6 +6,7 @@ mod drift;
 pub mod frontier;
 mod gitf;
 pub mod hooks;
+pub mod mcp;
 mod reverie;
 pub mod store;
 pub mod workflow;
@@ -32,13 +33,18 @@ fn main() -> ExitCode {
         "drift" => cmd_drift(&args[1..]),
         // Autumn Harvest durable workflow engine integration (CER-2756, Phase 2.1)
         "workflow" => cmd_workflow(&args[1..]),
+        // Model Context Protocol (MCP) server interface (CER-2758, Phase 2.3)
+        "mcp" => cmd_mcp(&args[1..]),
+        // Streaming HTTP server for cluster runners
+        "serve" => cmd_serve(&args[1..]),
         _ => {
             eprintln!(
                 "usage: cicatrix <inject [--target <path>] | record [<BUG_*.md>...] [--branch <id>] | \
                  query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>] | \
                  branch <fork <id> [--from <base>] [--frontier <vec>] | drop <id> | settle <id> | list | path <id>> | \
                  project-meta [--apply] | drift [scan [--repo <path>]] | \
-                 workflow <run <triage|audit|review-gate> | signal <id> <verdict> | list | status <id>>>"
+                 workflow <run <triage|audit|review-gate> | signal <id> <verdict> | list | status <id>> | \
+                 mcp [--stdio | --http [<bind>]] [--bind <bind>] | serve [--mcp] [--bind <bind>]>"
             );
             ExitCode::FAILURE
         }
@@ -1554,6 +1560,131 @@ fn cmd_workflow_status(rest: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `mcp [--stdio | --http [<bind>]] [--bind <bind>]` — run the Model Context Protocol (MCP) server.
+fn cmd_mcp(rest: &[String]) -> ExitCode {
+    let mut mode = "stdio";
+    let mut http_bind = "127.0.0.1:8080".to_string();
+    let mut it = rest.iter().peekable();
+
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--stdio" => {
+                mode = "stdio";
+            }
+            "--http" => {
+                mode = "http";
+                if let Some(next) = it.peek() {
+                    if !next.starts_with("--") {
+                        http_bind = it.next().unwrap().clone();
+                    }
+                }
+            }
+            "--bind" => {
+                mode = "http";
+                match it.next() {
+                    Some(b) => http_bind = b.clone(),
+                    None => {
+                        eprintln!("cicatrix mcp: --bind requires <address:port>");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix mcp: unknown flag {flag}");
+                return ExitCode::FAILURE;
+            }
+            other => {
+                eprintln!("cicatrix mcp: unexpected argument {other}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let rt = match create_tokio_runtime() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("cicatrix mcp: failed to initialize tokio runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match mode {
+        "stdio" => {
+            if let Err(e) = rt.block_on(mcp::run_stdio_server()) {
+                eprintln!("cicatrix mcp: stdio server exited with error: {e}");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        "http" => {
+            if let Err(e) = rt.block_on(mcp::run_http_server(&http_bind)) {
+                eprintln!("cicatrix mcp: http server failed on {http_bind}: {e}");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        _ => ExitCode::FAILURE,
+    }
+}
+
+/// `serve [--mcp] [--bind <bind>]` — run HTTP server for cluster runners.
+fn cmd_serve(rest: &[String]) -> ExitCode {
+    let mut http_bind = "127.0.0.1:8080".to_string();
+    let mut it = rest.iter();
+
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--mcp" => {
+                // MCP HTTP service is currently the default and primary service
+            }
+            "--bind" => match it.next() {
+                Some(b) => http_bind = b.clone(),
+                None => {
+                    eprintln!("cicatrix serve: --bind requires <address:port>");
+                    return ExitCode::FAILURE;
+                }
+            },
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix serve: unknown flag {flag}");
+                return ExitCode::FAILURE;
+            }
+            other => {
+                eprintln!("cicatrix serve: unexpected argument {other}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let rt = match create_tokio_runtime() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("cicatrix serve: failed to initialize tokio runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if let Err(e) = rt.block_on(mcp::run_http_server(&http_bind)) {
+        eprintln!("cicatrix serve: http server failed on {http_bind}: {e}");
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn create_tokio_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .or_else(|_| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+        })
 }
 
 #[cfg(test)]

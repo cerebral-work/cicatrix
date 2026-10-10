@@ -204,7 +204,7 @@ pub async fn aggregate_drift_report(
 }
 
 /// Convention audit workflow orchestrating cross-repo marker scans and drift aggregation.
-#[workflow]
+#[workflow(mcp)]
 pub async fn audit_workflow(
     ctx: &WorkflowContext,
     input: AuditInput,

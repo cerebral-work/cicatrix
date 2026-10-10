@@ -1,0 +1,359 @@
+//! MCP server implementation supporting Stdio and HTTP transports.
+//!
+//! Dual transports:
+//! - Stdio: line-delimited JSON-RPC 2.0 over standard I/O for local agent executions.
+//! - HTTP: streaming HTTP 1.1 server supporting `GET /health`, `POST /mcp`, and `GET /sse`.
+
+use std::io;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+
+use serde_json::{json, Value};
+
+use crate::mcp::protocol::{
+    JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpToolCallResult, MCP_PROTOCOL_VERSION,
+};
+use crate::mcp::tools::{execute_tool, mcp_tools, ToolExecutionError};
+
+/// Process a single JSON-RPC 2.0 request value, returning the JSON-RPC response value if not a notification.
+pub async fn handle_json_rpc(req_val: Value) -> Option<Value> {
+    let req: JsonRpcRequest = match serde_json::from_value(req_val) {
+        Ok(r) => r,
+        Err(e) => {
+            return Some(
+                serde_json::to_value(JsonRpcResponse::error(
+                    Value::Null,
+                    JsonRpcError::invalid_request(format!("invalid JSON-RPC request: {e}")),
+                ))
+                .unwrap_or(Value::Null),
+            );
+        }
+    };
+
+    let id = req.id.clone();
+    let is_notification = id.is_none();
+
+    let res = match req.method.as_str() {
+        "initialize" => Some(json!({
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {
+                "tools": {}
+            },
+            "serverInfo": {
+                "name": "cicatrix",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        })),
+        "notifications/initialized" | "initialized" => None,
+        "ping" => Some(json!({})),
+        "tools/list" => {
+            let tools = mcp_tools();
+            Some(json!({ "tools": tools }))
+        }
+        "tools/call" => {
+            let params = req.params.as_ref().and_then(Value::as_object);
+            let tool_name = params.and_then(|p| p.get("name")).and_then(Value::as_str);
+            let empty_args = json!({});
+            let arguments = params
+                .and_then(|p| p.get("arguments"))
+                .unwrap_or(&empty_args);
+
+            match tool_name {
+                Some(name) => match execute_tool(name, arguments).await {
+                    Ok(tool_res) => {
+                        let mcp_res = McpToolCallResult::success_json(&tool_res)
+                            .unwrap_or_else(|_| McpToolCallResult::success(tool_res.to_string()));
+                        Some(serde_json::to_value(mcp_res).unwrap_or(Value::Null))
+                    }
+                    Err(ToolExecutionError::Client(msg)) => {
+                        let mcp_res = McpToolCallResult::error(msg);
+                        Some(serde_json::to_value(mcp_res).unwrap_or(Value::Null))
+                    }
+                    Err(ToolExecutionError::Internal(details)) => {
+                        if let Some(req_id) = id {
+                            let (err, _) = JsonRpcError::internal_masked(&details);
+                            return Some(
+                                serde_json::to_value(JsonRpcResponse::error(req_id, err))
+                                    .unwrap_or(Value::Null),
+                            );
+                        } else {
+                            return None;
+                        }
+                    }
+                },
+                None => {
+                    if let Some(req_id) = id {
+                        return Some(
+                            serde_json::to_value(JsonRpcResponse::error(
+                                req_id,
+                                JsonRpcError::invalid_params(
+                                    "tools/call requires `name` parameter",
+                                ),
+                            ))
+                            .unwrap_or(Value::Null),
+                        );
+                    } else {
+                        return None;
+                    }
+                }
+            }
+        }
+        other => {
+            if let Some(req_id) = id {
+                return Some(
+                    serde_json::to_value(JsonRpcResponse::error(
+                        req_id,
+                        JsonRpcError::method_not_found(other),
+                    ))
+                    .unwrap_or(Value::Null),
+                );
+            } else {
+                return None;
+            }
+        }
+    };
+
+    if is_notification {
+        return None;
+    }
+
+    let req_id = id.unwrap_or(Value::Null);
+    res.map(|val| {
+        serde_json::to_value(JsonRpcResponse::success(req_id, val)).unwrap_or(Value::Null)
+    })
+}
+
+/// Run the stdio JSON-RPC MCP server until standard input closes.
+pub async fn run_stdio_server() -> io::Result<()> {
+    eprintln!("[cicatrix-mcp] starting stdio transport (MCP v{MCP_PROTOCOL_VERSION})...");
+    let stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+    let mut reader = BufReader::new(stdin).lines();
+
+    while let Some(line) = reader.next_line().await? {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let parsed_val: Result<Value, _> = serde_json::from_str(trimmed);
+        match parsed_val {
+            Ok(req_val) => {
+                if let Some(resp_val) = handle_json_rpc(req_val).await {
+                    let mut resp_str = serde_json::to_string(&resp_val)?;
+                    resp_str.push('\n');
+                    stdout.write_all(resp_str.as_bytes()).await?;
+                    stdout.flush().await?;
+                }
+            }
+            Err(e) => {
+                let err_resp = JsonRpcResponse::error(
+                    Value::Null,
+                    JsonRpcError::parse_error(format!("invalid JSON: {e}")),
+                );
+                let mut resp_str = serde_json::to_string(&err_resp)?;
+                resp_str.push('\n');
+                stdout.write_all(resp_str.as_bytes()).await?;
+                stdout.flush().await?;
+            }
+        }
+    }
+    eprintln!("[cicatrix-mcp] stdio transport closed");
+    Ok(())
+}
+
+fn find_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
+    let mut buf = vec![0u8; 8192];
+    let mut header_bytes = Vec::new();
+
+    loop {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        header_bytes.extend_from_slice(&buf[..n]);
+        if let Some(pos) = find_header_end(&header_bytes) {
+            let (headers_part, remaining_body) = header_bytes.split_at(pos);
+            let headers_str = String::from_utf8_lossy(headers_part);
+            let mut lines = headers_str.lines();
+            let req_line = lines.next().unwrap_or("");
+            let mut parts = req_line.split_whitespace();
+            let method = parts.next().unwrap_or("").to_uppercase();
+            let path = parts.next().unwrap_or("/");
+
+            let mut content_length: usize = 0;
+            for line in lines {
+                if let Some(val) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = val.trim().parse().unwrap_or(0);
+                }
+            }
+
+            let initial_body = &remaining_body[4..];
+            let mut body = initial_body.to_vec();
+            while body.len() < content_length {
+                let needed = content_length - body.len();
+                let chunk_size = needed.min(buf.len());
+                let read_n = stream.read(&mut buf[..chunk_size]).await?;
+                if read_n == 0 {
+                    break;
+                }
+                body.extend_from_slice(&buf[..read_n]);
+            }
+
+            match (method.as_str(), path) {
+                ("GET", "/health") => {
+                    let res_body = json!({
+                        "status": "ok",
+                        "service": "cicatrix-mcp",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    })
+                    .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        res_body.len(),
+                        res_body
+                    );
+                    stream.write_all(response.as_bytes()).await?;
+                    stream.flush().await?;
+                    let _ = stream.shutdown().await;
+                    return Ok(());
+                }
+                ("GET", "/sse") => {
+                    let sse_header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+                    stream.write_all(sse_header.as_bytes()).await?;
+                    let initial_event = "event: endpoint\r\ndata: /mcp\r\n\r\n";
+                    stream.write_all(initial_event.as_bytes()).await?;
+                    stream.flush().await?;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    let _ = stream.shutdown().await;
+                    return Ok(());
+                }
+                ("POST", "/mcp") | ("POST", "/") => {
+                    let req_json: Result<Value, _> = serde_json::from_slice(&body);
+                    match req_json {
+                        Ok(val) => {
+                            let resp = handle_json_rpc(val).await;
+                            let res_body = match resp {
+                                Some(r) => {
+                                    serde_json::to_string(&r).unwrap_or_else(|_| "{}".to_string())
+                                }
+                                None => "{}".to_string(),
+                            };
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                res_body.len(),
+                                res_body
+                            );
+                            stream.write_all(response.as_bytes()).await?;
+                            stream.flush().await?;
+                            let _ = stream.shutdown().await;
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            let err_body = json!({
+                                "jsonrpc": "2.0",
+                                "id": null,
+                                "error": {
+                                    "code": crate::mcp::protocol::PARSE_ERROR,
+                                    "message": format!("parse error: {e}")
+                                }
+                            })
+                            .to_string();
+                            let response = format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                err_body.len(),
+                                err_body
+                            );
+                            stream.write_all(response.as_bytes()).await?;
+                            stream.flush().await?;
+                            let _ = stream.shutdown().await;
+                            return Ok(());
+                        }
+                    }
+                }
+                _ => {
+                    let not_found =
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    stream.write_all(not_found.as_bytes()).await?;
+                    stream.flush().await?;
+                    let _ = stream.shutdown().await;
+                    return Ok(());
+                }
+            }
+        }
+        if header_bytes.len() > 65536 {
+            let too_large = "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(too_large.as_bytes()).await?;
+            stream.flush().await?;
+            let _ = stream.shutdown().await;
+            return Ok(());
+        }
+    }
+}
+
+/// Run the streaming HTTP MCP server listening on `bind_addr`.
+pub async fn run_http_server(bind_addr: &str) -> io::Result<()> {
+    let listener = TcpListener::bind(bind_addr).await?;
+    eprintln!(
+        "[cicatrix-mcp] HTTP server listening on http://{bind_addr} (/health, /mcp, /sse)..."
+    );
+
+    loop {
+        let (socket, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            if let Err(e) = handle_http_connection(socket).await {
+                eprintln!("[cicatrix-mcp] connection error: {e}");
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_jsonrpc_initialize_and_tools_list() {
+        let init_req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        });
+        let init_resp = handle_json_rpc(init_req).await.expect("response expected");
+        assert_eq!(init_resp["id"], 1);
+        assert_eq!(init_resp["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
+        assert_eq!(init_resp["result"]["serverInfo"]["name"], "cicatrix");
+
+        let list_req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        });
+        let list_resp = handle_json_rpc(list_req).await.expect("response expected");
+        assert_eq!(list_resp["id"], 2);
+        let tools = list_resp["result"]["tools"]
+            .as_array()
+            .expect("array of tools");
+        assert!(tools.len() >= 6);
+    }
+
+    #[tokio::test]
+    async fn test_jsonrpc_unknown_method() {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "unknown_tool_rpc"
+        });
+        let resp = handle_json_rpc(req).await.expect("response expected");
+        assert_eq!(resp["id"], 99);
+        assert_eq!(
+            resp["error"]["code"],
+            crate::mcp::protocol::METHOD_NOT_FOUND
+        );
+    }
+}

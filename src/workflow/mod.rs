@@ -24,6 +24,8 @@ pub use triage::{
     ReviewGateInput, ReviewGateReport, TriageInput, TriageNormalizedFailure, TriageReport,
 };
 
+pub use crate::mcp::{mcp_tools, McpToolDefinition};
+
 use std::path::PathBuf;
 
 /// Maximum number of events allowed in a single workflow execution history.

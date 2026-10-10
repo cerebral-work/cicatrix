@@ -294,7 +294,7 @@ pub async fn isolate_minimal_reproducer(
 
 /// Regression triage workflow orchestrating failure ingestion, commit bisection,
 /// and minimal reproducer isolation with validated schema integrity.
-#[workflow]
+#[workflow(mcp)]
 pub async fn triage_workflow(
     ctx: &WorkflowContext,
     input: TriageInput,
@@ -387,7 +387,7 @@ pub struct ReviewGateReport {
 }
 
 /// Review gate workflow parking until an `operator_verdict` signal is received.
-#[workflow]
+#[workflow(mcp)]
 pub async fn review_gate_workflow(
     ctx: &WorkflowContext,
     input: ReviewGateInput,

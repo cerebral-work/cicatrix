@@ -4,8 +4,11 @@
 //! `.cicatrix/establish-baseline.sh` writes the marker only when these pass. Tests assert
 //! *structure/invariants*, not just happy-path strings (see CLAUDE.md meta-patterns).
 
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::Duration;
 
 const BIN: &str = env!("CARGO_BIN_EXE_cicatrix");
 
@@ -2990,6 +2993,314 @@ fn test_rest_context_assemble_endpoint() {
             "Expected intrusion error, got: {res}"
         );
         assert!(!res.contains("/home/"), "Leaked path in body: {res}");
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn test_cortex_settle_cli_ingest_and_status() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("cortex_settle.db");
+    let db_str = db_path.to_str().unwrap();
+    let observed_dir = tmp.path().join("observed");
+    let observed_str = observed_dir.to_str().unwrap();
+
+    let envs = [("CICATRIX_DB_PATH", db_str), ("CICATRIX_NO_REVERIE", "1")];
+
+    // 1. Ingest negative settle event
+    let negative_event = serde_json::json!({
+        "event_id": "evt-cli-neg-001",
+        "job_id": "job-cli-100",
+        "settle_action": "discard",
+        "operator_decision": "discard",
+        "proposal_summary": "invalid prompt tweak causes regression",
+        "rejection_reason": "operator discarded run after regression",
+        "files": ["crates/reverie-store/src/embed.rs"],
+        "meta_pattern": "prompt-drift"
+    })
+    .to_string();
+
+    let out1 = run_with_env(
+        &[
+            "cortex",
+            "ingest-settle",
+            "--raw",
+            &negative_event,
+            "--observed-dir",
+            observed_str,
+            "--actor",
+            "operator",
+        ],
+        &envs,
+    );
+    assert!(
+        out1.status.success(),
+        "ingest negative failed: {:?}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    let stdout1 = String::from_utf8_lossy(&out1.stdout);
+    assert!(stdout1.contains("[ingested_negative]"));
+    assert!(stdout1.contains("evt-cli-neg-001"));
+    assert!(stdout1.contains("fact written:"));
+
+    // Verify markdown defect fact file was generated in observed_dir
+    let entries: Vec<_> = std::fs::read_dir(&observed_dir)
+        .expect("read observed dir")
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(entries.len(), 1, "expected 1 observed fact file");
+    let fact_path = entries[0].path();
+    let fact_content = std::fs::read_to_string(&fact_path).expect("read fact file");
+    assert!(fact_content.contains("- **id:** fact:cortex-settle"));
+    assert!(fact_content.contains("- **status:** observed"));
+    assert!(fact_content.contains("crates/reverie-store/src/embed.rs"));
+    assert!(fact_content.contains("operator discarded run after regression"));
+    assert!(fact_content.contains("## Reproduction"));
+    assert!(fact_content.contains("## Root cause"));
+    assert!(fact_content.contains("## Symptom"));
+
+    // 2. Ingest duplicate event — ensure idempotency
+    let out2 = run_with_env(
+        &[
+            "cortex",
+            "ingest-settle",
+            "--raw",
+            &negative_event,
+            "--observed-dir",
+            observed_str,
+        ],
+        &envs,
+    );
+    assert!(out2.status.success());
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(stdout2.contains("[duplicate_skipped]"));
+
+    // 3. Ingest positive settle event
+    let positive_event = serde_json::json!({
+        "event_id": "evt-cli-pos-002",
+        "job_id": "job-cli-200",
+        "settle_action": "apply",
+        "operator_decision": "apply",
+        "proposal_summary": "verified safe fix applied cleanly",
+        "files": ["src/lib.rs"]
+    })
+    .to_string();
+
+    let out3 = run_with_env(
+        &[
+            "cortex",
+            "ingest-settle",
+            "--raw",
+            &positive_event,
+            "--observed-dir",
+            observed_str,
+        ],
+        &envs,
+    );
+    assert!(out3.status.success());
+    let stdout3 = String::from_utf8_lossy(&out3.stdout);
+    assert!(stdout3.contains("[ingested_positive]"));
+
+    // Ensure no additional defect fact was created for the positive event
+    let entries_after: Vec<_> = std::fs::read_dir(&observed_dir)
+        .expect("read observed dir")
+        .filter_map(Result::ok)
+        .collect();
+    assert_eq!(
+        entries_after.len(),
+        1,
+        "positive event must not create defect fact"
+    );
+
+    // 4. Check settle-status CLI output
+    let out_status = run_with_env(&["cortex", "settle-status"], &envs);
+    assert!(out_status.status.success());
+    let status_stdout = String::from_utf8_lossy(&out_status.stdout);
+    assert!(status_stdout.contains("Total events: 2"));
+    assert!(status_stdout.contains("Negative verdicts: 1"));
+    assert!(status_stdout.contains("Positive verdicts: 1"));
+    assert!(status_stdout.contains("Observed facts linked: 1"));
+
+    // 5. Check settle-status --json
+    let out_status_json = run_with_env(&["cortex", "settle-status", "--json"], &envs);
+    assert!(out_status_json.status.success());
+    let parsed_status: serde_json::Value =
+        serde_json::from_slice(&out_status_json.stdout).expect("valid json status");
+    assert_eq!(parsed_status["total_events"], 2);
+    assert_eq!(parsed_status["negative_verdicts"], 1);
+    assert_eq!(parsed_status["positive_verdicts"], 1);
+    assert_eq!(parsed_status["observed_facts_linked"], 1);
+
+    // 6. Check settle-events listing with filters
+    let out_events = run_with_env(
+        &["cortex", "settle-events", "--negative", "true", "--json"],
+        &envs,
+    );
+    assert!(out_events.status.success());
+    let events_val: serde_json::Value =
+        serde_json::from_slice(&out_events.stdout).expect("valid json events");
+    let events_arr = events_val.as_array().expect("array of events");
+    assert_eq!(events_arr.len(), 1);
+    assert_eq!(events_arr[0]["event_id"], "evt-cli-neg-001");
+    assert_eq!(events_arr[0]["is_negative"], true);
+}
+
+#[test]
+fn test_cortex_settle_cli_tripwire_fail_closed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("cortex_tripwire.db");
+    let db_str = db_path.to_str().unwrap();
+    let envs = [("CICATRIX_DB_PATH", db_str), ("CICATRIX_NO_REVERIE", "1")];
+
+    // Seed canaries
+    let seed_out = run_with_env(&["tripwire", "seed"], &envs);
+    assert!(seed_out.status.success());
+
+    // Ingest event referencing synthetic canary sentinel path
+    let canary_payload = serde_json::json!({
+        "event_id": "evt-tripwire-001",
+        "job_id": "job-rogue-001",
+        "settle_action": "discard",
+        "operator_decision": "discard",
+        "proposal_summary": "probing canary surface",
+        "files": ["TRIPWIRE_CANARY_SENTINEL_ALPHA"]
+    })
+    .to_string();
+
+    let out = run_with_env(
+        &["cortex", "ingest-settle", "--raw", &canary_payload],
+        &envs,
+    );
+    assert!(
+        !out.status.success(),
+        "unauthorized canary settle ingestion must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("TRIPWIRE INTRUSION DETECTED"));
+    assert!(stderr.contains("TRIPWIRE_CANARY_SENTINEL_ALPHA"));
+}
+
+#[test]
+fn test_cortex_settle_http_rest_endpoints() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("cortex_http.db");
+    let db_str = db_path.to_str().unwrap();
+    let observed_dir = tmp.path().join("observed");
+    let observed_str = observed_dir.to_str().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
+    let bind_port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let bind_addr = format!("127.0.0.1:{bind_port}");
+
+    let mut child = Command::new(BIN)
+        .arg("serve")
+        .arg("--mcp")
+        .arg("--bind")
+        .arg(&bind_addr)
+        .env("CICATRIX_DB_PATH", db_str)
+        .env("CICATRIX_NO_REVERIE", "1")
+        .spawn()
+        .expect("failed to spawn cicatrix serve --mcp");
+
+    // Wait until server is reachable
+    let mut connected = false;
+    for _ in 0..50 {
+        if let Ok(mut stream) = TcpStream::connect(&bind_addr) {
+            let req =
+                format!("GET /health HTTP/1.1\r\nHost: {bind_addr}\r\nConnection: close\r\n\r\n");
+            if stream.write_all(req.as_bytes()).is_ok() {
+                let mut res = String::new();
+                if stream.read_to_string(&mut res).is_ok() && res.contains("200 OK") {
+                    connected = true;
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(connected, "HTTP server did not become ready in time");
+
+    // 1. POST /api/v1/cortex/settle: Ingest negative settle event
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let payload = serde_json::json!({
+            "event_id": "evt-http-e2e-001",
+            "job_id": "job-http-e2e-100",
+            "settle_action": "discard",
+            "operator_decision": "discard",
+            "proposal_summary": "regression caught in e2e http test",
+            "observed_dir": observed_str,
+            "files": ["src/main.rs"]
+        })
+        .to_string();
+        let req = format!(
+            "POST /api/v1/cortex/settle HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "Expected 200 OK, got: {res}");
+        assert!(
+            res.contains("\"status\":\"ingested_negative\""),
+            "Expected ingested_negative, got: {res}"
+        );
+        assert!(
+            res.contains("\"is_negative\":true"),
+            "Expected is_negative:true, got: {res}"
+        );
+    }
+
+    // 2. GET /api/v1/cortex/settle/status: Assert aggregate counts
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let req = format!(
+            "GET /api/v1/cortex/settle/status HTTP/1.1\r\nHost: {bind_addr}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "Expected 200 OK, got: {res}");
+        assert!(
+            res.contains("\"negative_verdicts\":1"),
+            "Expected negative_verdicts:1, got: {res}"
+        );
+        assert!(
+            res.contains("\"total_events\":1"),
+            "Expected total_events:1, got: {res}"
+        );
+    }
+
+    // 3. GET /api/v1/cortex/settles: List events
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let req = format!(
+            "GET /api/v1/cortex/settles?is_negative=true HTTP/1.1\r\nHost: {bind_addr}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"), "Expected 200 OK, got: {res}");
+        assert!(
+            res.contains("evt-http-e2e-001"),
+            "Expected evt-http-e2e-001, got: {res}"
+        );
     }
 
     let _ = child.kill();

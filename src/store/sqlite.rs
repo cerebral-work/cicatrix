@@ -21,6 +21,8 @@ pub const INITIAL_SCHEMA: &str = include_str!("../../migrations/0001_initial_sch
 pub const TRIPWIRE_SCHEMA: &str = include_str!("../../migrations/0002_tripwire_registry.sql");
 /// Autonomy ledger schema migration embedded at compile time (CER-2762, Phase 4.1).
 pub const AUTONOMY_SCHEMA: &str = include_str!("../../migrations/0003_autonomy_ledger.sql");
+/// Cortex settle learning loop schema migration embedded at compile time (CER-2764, Phase 4.3).
+pub const CORTEX_SCHEMA: &str = include_str!("../../migrations/0004_cortex_settle_events.sql");
 
 fn sqlite_to_io(e: rusqlite::Error) -> io::Error {
     io::Error::other(e.to_string())
@@ -149,6 +151,7 @@ fn apply_migrations(conn: &Connection) -> io::Result<()> {
     conn.execute_batch(AUTONOMY_SCHEMA).map_err(sqlite_to_io)?;
     crate::autonomy::seed_default_capabilities(conn)
         .map_err(|e| io::Error::other(e.to_string()))?;
+    conn.execute_batch(CORTEX_SCHEMA).map_err(sqlite_to_io)?;
     Ok(())
 }
 
@@ -701,6 +704,49 @@ impl SqliteStore {
             required_tier,
             None,
         )
+    }
+
+    // --- Cortex settle learning loop outbox integration (CER-2764, Phase 4.3) ---
+
+    /// Ingest a single Cortex settle event through the given consumer.
+    pub fn ingest_cortex_settle(
+        &self,
+        consumer: &crate::cortex::SettleConsumer,
+        event: &crate::cortex::SettleOutcomeEvent,
+    ) -> Result<crate::cortex::SettleIngestResult, crate::cortex::CortexError> {
+        consumer.ingest_event(&self.conn, event)
+    }
+
+    /// Ingest Cortex settle events from a raw JSON/NDJSON string through the consumer.
+    pub fn ingest_cortex_settle_str(
+        &self,
+        consumer: &crate::cortex::SettleConsumer,
+        raw: &str,
+    ) -> Result<Vec<crate::cortex::SettleIngestResult>, crate::cortex::CortexError> {
+        consumer.ingest_str(&self.conn, raw)
+    }
+
+    /// Retrieve summary metrics for Cortex settle events.
+    pub fn get_cortex_settle_status(
+        &self,
+    ) -> Result<crate::cortex::SettleStatusSummary, crate::cortex::CortexError> {
+        crate::cortex::get_settle_status_summary(&self.conn)
+    }
+
+    /// List recorded Cortex settle events matching filter criteria.
+    pub fn list_cortex_settle_events(
+        &self,
+        filter: &crate::cortex::SettleQueryFilter,
+    ) -> Result<Vec<crate::cortex::RecordedSettleEvent>, crate::cortex::CortexError> {
+        crate::cortex::list_settle_events(&self.conn, filter)
+    }
+
+    /// Get a recorded Cortex settle event by ID or event_id.
+    pub fn get_cortex_settle_event(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::cortex::RecordedSettleEvent>, crate::cortex::CortexError> {
+        crate::cortex::get_settle_event(&self.conn, id)
     }
 }
 

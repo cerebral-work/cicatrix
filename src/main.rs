@@ -10,6 +10,7 @@ pub mod mcp;
 mod reverie;
 pub mod reversibility;
 pub mod store;
+pub mod tripwire;
 pub mod workflow;
 
 use std::path::Path;
@@ -38,6 +39,8 @@ fn main() -> ExitCode {
         "mcp" => cmd_mcp(&args[1..]),
         // Wheelhorse reversibility action pipeline (CER-2759, Phase 3.1)
         "reversibility" => cmd_reversibility(&args[1..]),
+        // Synthetic canary tripwire registry & intrusion guard (CER-2760, Phase 3.2)
+        "tripwire" => cmd_tripwire(&args[1..]),
         // Streaming HTTP server for cluster runners
         "serve" => cmd_serve(&args[1..]),
         _ => {
@@ -48,6 +51,7 @@ fn main() -> ExitCode {
                  project-meta [--apply] | drift [scan [--repo <path>]] | \
                  workflow <run <triage|audit|review-gate> | signal <id> <verdict> | list | status <id>> | \
                  reversibility <eval|classify|plan|validate> [--diff <path>] [--tier <shadow|supervised|autonomous>] [--json] | \
+                 tripwire <list [--json] | check <target> [--content <text>] [--actor <actor>] [--action <action>] [--json] | touches [--limit <N>] [--canary <id>] [--json] | seed> | \
                  mcp [--stdio | --http [<bind>]] [--bind <bind>] | serve [--mcp] [--bind <bind>]>"
             );
             ExitCode::FAILURE
@@ -230,6 +234,7 @@ fn cmd_query(rest: &[String]) -> ExitCode {
     let mut as_of: Option<String> = None;
     let mut frontier_arg: Option<String> = None;
     let mut branch_arg: Option<String> = None;
+    let mut actor_arg: Option<String> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -254,6 +259,13 @@ fn cmd_query(rest: &[String]) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
+            "--actor" => match it.next() {
+                Some(act) => actor_arg = Some(act.clone()),
+                None => {
+                    eprintln!("cicatrix query: --actor needs a <name>");
+                    return ExitCode::FAILURE;
+                }
+            },
             flag if flag.starts_with("--") => {
                 eprintln!("cicatrix query: unknown flag {flag}");
                 return ExitCode::FAILURE;
@@ -263,10 +275,19 @@ fn cmd_query(rest: &[String]) -> ExitCode {
     }
     if files.is_empty() {
         eprintln!(
-            "usage: cicatrix query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>]"
+            "usage: cicatrix query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>] [--actor <name>]"
         );
         return ExitCode::FAILURE;
     }
+
+    let actor = actor_arg
+        .or_else(|| {
+            std::env::var("CICATRIX_ACTOR")
+                .ok()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+        })
+        .unwrap_or_else(|| "agent".to_string());
 
     let branch = branch_arg.or_else(|| {
         std::env::var("CICATRIX_BRANCH")
@@ -295,6 +316,11 @@ fn cmd_query(rest: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+        // Fail-closed canary tripwire check (CER-2760, Phase 3.2)
+        if let Err(e) = branch_store.guard_paths(&files, &actor, "query") {
+            eprintln!("cicatrix query: tripwire intrusion detected: {e}");
+            return ExitCode::FAILURE;
+        }
         match branch_store.touches_known_bug(&files) {
             Ok(h) => h,
             Err(e) => {
@@ -303,6 +329,18 @@ fn cmd_query(rest: &[String]) -> ExitCode {
             }
         }
     } else {
+        let store = match store::SqliteStore::from_env() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("cicatrix query: failed to open sqlite database for tripwire check: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        // Fail-closed canary tripwire check (CER-2760, Phase 3.2)
+        if let Err(e) = store.guard_paths(&files, &actor, "query") {
+            eprintln!("cicatrix query: tripwire intrusion detected: {e}");
+            return ExitCode::FAILURE;
+        }
         let bridge = reverie::ReverieBridge::from_env();
         match bridge.touches_known_bug(&files) {
             Ok(h) => h,
@@ -1709,6 +1747,7 @@ fn cmd_reversibility(rest: &[String]) -> ExitCode {
     let mut diff_source: Option<String> = None;
     let mut tier = AutonomyTier::Supervised;
     let mut json_output = false;
+    let mut actor_arg: Option<String> = None;
 
     let mut it = rest[1..].iter();
     while let Some(arg) = it.next() {
@@ -1732,6 +1771,13 @@ fn cmd_reversibility(rest: &[String]) -> ExitCode {
                     eprintln!(
                         "cicatrix reversibility: --tier requires shadow, supervised, or autonomous"
                     );
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--actor" => match it.next() {
+                Some(a) => actor_arg = Some(a.clone()),
+                None => {
+                    eprintln!("cicatrix reversibility: --actor requires a name");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1801,6 +1847,45 @@ fn cmd_reversibility(rest: &[String]) -> ExitCode {
 
     if diff_content.trim().is_empty() {
         eprintln!("cicatrix reversibility: diff content is empty");
+        return ExitCode::FAILURE;
+    }
+
+    let actor = actor_arg
+        .or_else(|| {
+            std::env::var("CICATRIX_ACTOR")
+                .ok()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+        })
+        .unwrap_or_else(|| "agent".to_string());
+
+    let store = match store::SqliteStore::from_env() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cicatrix reversibility: failed to open store for tripwire check: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Fail-closed synthetic canary tripwire check (CER-2760, Phase 3.2)
+    if let Err(e) = store.guard_diff(&diff_content, &actor) {
+        if json_output {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "error": "tripwire_intrusion_detected",
+                    "canary_id": e.canary_id,
+                    "target_path": e.target_path,
+                    "actor": e.actor,
+                    "action": e.action,
+                    "touch_id": e.touch_id,
+                    "cortex_notified": e.cortex_notified,
+                    "message": e.message,
+                })
+            );
+        } else {
+            eprintln!("cicatrix reversibility: tripwire intrusion detected: {e}");
+        }
         return ExitCode::FAILURE;
     }
 
@@ -1922,6 +2007,258 @@ fn cmd_reversibility(rest: &[String]) -> ExitCode {
         other => {
             eprintln!(
                 "cicatrix reversibility: unknown subcommand `{other}`; expected eval, classify, plan, or validate"
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_tripwire(rest: &[String]) -> ExitCode {
+    if rest.is_empty() {
+        eprintln!(
+            "usage: cicatrix tripwire <list [--json] | check <target> [--content <text>] [--actor <actor>] [--action <action>] [--json] | touches [--limit <N>] [--canary <id>] [--json] | seed>"
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let subcmd = rest[0].as_str();
+    let sub_args = &rest[1..];
+
+    let store = match store::SqliteStore::from_env() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cicatrix tripwire: failed to open store: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match subcmd {
+        "list" => {
+            let mut json_output = false;
+            for a in sub_args {
+                if a == "--json" {
+                    json_output = true;
+                }
+            }
+            match store.list_tripwire_canaries() {
+                Ok(canaries) => {
+                    if json_output {
+                        match serde_json::to_string_pretty(&canaries) {
+                            Ok(j) => println!("{j}"),
+                            Err(e) => {
+                                eprintln!("cicatrix tripwire list: json serialization error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else if canaries.is_empty() {
+                        println!("No synthetic canaries registered.");
+                    } else {
+                        println!("Registered Synthetic Canaries ({}):", canaries.len());
+                        for c in &canaries {
+                            println!(
+                                "  [{}] target: `{}` (roles: {}, active: {})",
+                                c.id,
+                                c.target_path,
+                                c.authorized_roles.join(", "),
+                                c.is_active
+                            );
+                            println!("    marker: `{}`", c.sentinel_marker);
+                            println!("    description: {}", c.description);
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix tripwire list failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "seed" => match store.seed_tripwire_canaries() {
+            Ok(count) => {
+                println!("Seeded {count} synthetic canaries into tripwire registry.");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("cicatrix tripwire seed failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "check" => {
+            if sub_args.is_empty() {
+                eprintln!(
+                    "usage: cicatrix tripwire check <target> [--content <text>] [--actor <actor>] [--action <action>] [--json]"
+                );
+                return ExitCode::FAILURE;
+            }
+
+            let target = &sub_args[0];
+            let mut content: Option<String> = None;
+            let mut actor_arg: Option<String> = None;
+            let mut action = "check".to_string();
+            let mut json_output = false;
+
+            let mut it = sub_args[1..].iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--content" => match it.next() {
+                        Some(c) => content = Some(c.clone()),
+                        None => {
+                            eprintln!("cicatrix tripwire check: --content requires <text>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--actor" => match it.next() {
+                        Some(a) => actor_arg = Some(a.clone()),
+                        None => {
+                            eprintln!("cicatrix tripwire check: --actor requires <actor>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--action" => match it.next() {
+                        Some(act) => action = act.clone(),
+                        None => {
+                            eprintln!("cicatrix tripwire check: --action requires <action>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => {
+                        json_output = true;
+                    }
+                    unknown => {
+                        eprintln!("cicatrix tripwire check: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            let actor = actor_arg
+                .or_else(|| {
+                    std::env::var("CICATRIX_ACTOR")
+                        .ok()
+                        .map(|a| a.trim().to_string())
+                        .filter(|a| !a.is_empty())
+                })
+                .unwrap_or_else(|| "agent".to_string());
+
+            match store.guard_check(target, content.as_deref(), &actor, &action) {
+                Ok(()) => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "status": "clear",
+                                "verdict": "permitted",
+                                "target": target,
+                                "actor": actor,
+                                "action": action,
+                            })
+                        );
+                    } else {
+                        println!(
+                            "Tripwire check clear: permitted for actor `{actor}` on `{target}`"
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "status": "tripped",
+                                "error": "tripwire_intrusion_detected",
+                                "canary_id": e.canary_id,
+                                "target_path": e.target_path,
+                                "actor": e.actor,
+                                "action": e.action,
+                                "touch_id": e.touch_id,
+                                "cortex_notified": e.cortex_notified,
+                                "message": e.message,
+                            })
+                        );
+                    } else {
+                        eprintln!("cicatrix tripwire check: intrusion detected: {e}");
+                    }
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "touches" => {
+            let mut limit = 50usize;
+            let mut canary_id: Option<String> = None;
+            let mut json_output = false;
+
+            let mut it = sub_args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--limit" => {
+                        match it.next().and_then(|s| s.parse::<usize>().ok()) {
+                            Some(l) => limit = l,
+                            None => {
+                                eprintln!("cicatrix tripwire touches: --limit requires a positive integer");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    }
+                    "--canary" => match it.next() {
+                        Some(cid) => canary_id = Some(cid.clone()),
+                        None => {
+                            eprintln!("cicatrix tripwire touches: --canary requires <id>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--json" => {
+                        json_output = true;
+                    }
+                    unknown => {
+                        eprintln!("cicatrix tripwire touches: unknown option `{unknown}`");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            match store.list_tripwire_touches(limit, canary_id.as_deref()) {
+                Ok(touches) => {
+                    if json_output {
+                        match serde_json::to_string_pretty(&touches) {
+                            Ok(j) => println!("{j}"),
+                            Err(e) => {
+                                eprintln!("cicatrix tripwire touches: json error: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else if touches.is_empty() {
+                        println!("No tripwire touches recorded.");
+                    } else {
+                        println!("Tripwire Touch Events ({}):", touches.len());
+                        for t in &touches {
+                            println!(
+                                "  [{}] touch_id={} canary={} actor={} action={} verdict={} cortex_notified={}",
+                                t.created_at,
+                                t.touch_id,
+                                t.canary_id,
+                                t.actor,
+                                t.action_type,
+                                t.verdict,
+                                t.cortex_notified
+                            );
+                            if let Some(ref ctx) = t.context_payload {
+                                println!("      context: {ctx}");
+                            }
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("cicatrix tripwire touches failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        other => {
+            eprintln!(
+                "cicatrix tripwire: unknown subcommand `{other}`; expected list, check, touches, or seed"
             );
             ExitCode::FAILURE
         }

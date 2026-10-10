@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 /// Initial schema migration embedded at compile time.
 pub const INITIAL_SCHEMA: &str = include_str!("../../migrations/0001_initial_schema.sql");
+/// Tripwire registry schema migration embedded at compile time (CER-2760, Phase 3.2).
+pub const TRIPWIRE_SCHEMA: &str = include_str!("../../migrations/0002_tripwire_registry.sql");
 
 fn sqlite_to_io(e: rusqlite::Error) -> io::Error {
     io::Error::other(e.to_string())
@@ -140,6 +142,8 @@ fn apply_migrations(conn: &Connection) -> io::Result<()> {
     conn.execute_batch(INITIAL_SCHEMA).map_err(sqlite_to_io)?;
     // Idempotent migration for existing pre-frontier databases:
     let _ = conn.execute("ALTER TABLE bug_facts ADD COLUMN frontier TEXT;", []);
+    conn.execute_batch(TRIPWIRE_SCHEMA).map_err(sqlite_to_io)?;
+    let _ = crate::tripwire::seed_canaries(conn)?;
     Ok(())
 }
 
@@ -553,6 +557,68 @@ impl SqliteStore {
             .map_err(sqlite_to_io)?;
         Ok(())
     }
+
+    /// Seed default synthetic canaries into the tripwire registry if not present.
+    pub fn seed_tripwire_canaries(&self) -> io::Result<usize> {
+        crate::tripwire::seed_canaries(&self.conn)
+    }
+
+    /// List all registered synthetic canaries.
+    pub fn list_tripwire_canaries(&self) -> io::Result<Vec<crate::tripwire::TripwireCanary>> {
+        crate::tripwire::list_canaries(&self.conn)
+    }
+
+    /// Register or update a synthetic canary in the tripwire registry.
+    pub fn register_tripwire_canary(
+        &self,
+        canary: &crate::tripwire::TripwireCanary,
+    ) -> io::Result<()> {
+        crate::tripwire::register_canary(&self.conn, canary)
+    }
+
+    /// Record a touch event in the `tripwire_touches` audit table.
+    pub fn record_tripwire_touch(&self, touch: &crate::tripwire::TripwireTouch) -> io::Result<()> {
+        crate::tripwire::record_touch(&self.conn, touch)
+    }
+
+    /// List recent tripwire audit touches.
+    pub fn list_tripwire_touches(
+        &self,
+        limit: usize,
+        canary_id: Option<&str>,
+    ) -> io::Result<Vec<crate::tripwire::TripwireTouch>> {
+        crate::tripwire::list_touches(&self.conn, limit, canary_id)
+    }
+
+    /// Guard a collection of target paths against tripwire canaries.
+    pub fn guard_paths(
+        &self,
+        paths: &[String],
+        actor: &str,
+        action: &str,
+    ) -> Result<(), crate::tripwire::TripwireIntrusionError> {
+        crate::tripwire::guard_paths(&self.conn, paths, actor, action)
+    }
+
+    /// Guard a unified diff patch string against tripwire canaries.
+    pub fn guard_diff(
+        &self,
+        diff: &str,
+        actor: &str,
+    ) -> Result<(), crate::tripwire::TripwireIntrusionError> {
+        crate::tripwire::guard_diff(&self.conn, diff, actor)
+    }
+
+    /// Guard a single target path and optional content against tripwire canaries.
+    pub fn guard_check(
+        &self,
+        target: &str,
+        content: Option<&str>,
+        actor: &str,
+        action: &str,
+    ) -> Result<(), crate::tripwire::TripwireIntrusionError> {
+        crate::tripwire::guard_check(&self.conn, target, content, actor, action)
+    }
 }
 
 impl BugStore for SqliteStore {
@@ -881,5 +947,23 @@ mod tests {
             )
             .expect("query branch_snapshots");
         assert_eq!(count, 1, "branch_snapshots table must exist in schema");
+    }
+
+    #[test]
+    fn tripwire_tables_and_canaries_seeded_on_open() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let canaries = store.list_tripwire_canaries().expect("list canaries");
+        assert_eq!(canaries.len(), 4, "default 4 canaries must be seeded");
+
+        // Verify tripwire_touches table exists
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='tripwire_touches';",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query tripwire_touches table");
+        assert_eq!(count, 1, "tripwire_touches table must exist in schema");
     }
 }

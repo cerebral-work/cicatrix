@@ -497,6 +497,20 @@ pub fn scan(
     }
 }
 
+/// Expand a leading `~` / `~/` under a given home directory (defaults to `$HOME`).
+pub fn expand_home_under(path: &str, home: Option<&str>) -> PathBuf {
+    if path == "~" {
+        if let Some(h) = home {
+            return PathBuf::from(h);
+        }
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(h) = home {
+            return PathBuf::from(h).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
 /// Expand a leading `~` / `~/` in a scanned repo path to `$HOME` for filesystem access; any other
 /// path passes through unchanged. This is applied ONLY to the per-repo `path` (what we `stat`), not
 /// to the display `root` — so the header keeps the portable `~/repos` string while the scan reaches
@@ -504,17 +518,20 @@ pub fn scan(
 /// and is reported in `skipped` (never silently dropped). Rust's `Path` does not expand `~` itself,
 /// so this seam is what lets a `~/...` config entry resolve to a real directory instead of skipping.
 pub fn expand_home(path: &str) -> PathBuf {
-    let home = || std::env::var("HOME").ok();
-    if path == "~" {
-        if let Some(h) = home() {
-            return PathBuf::from(h);
-        }
-    } else if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(h) = home() {
-            return PathBuf::from(h).join(rest);
-        }
-    }
-    PathBuf::from(path)
+    expand_home_under(path, std::env::var("HOME").ok().as_deref())
+}
+
+/// Orchestrate a full scan from a parsed `Config`, expanding paths under the provided home directory.
+pub fn scan_config_under(config: &Config, home: Option<&str>) -> MarkerTable {
+    let entries: Vec<(String, PathBuf, Option<Lang>)> = config
+        .repos
+        .iter()
+        .map(|r| {
+            let lang = r.lang.as_deref().map(Lang::from_label);
+            (r.name.clone(), expand_home_under(&r.path, home), lang)
+        })
+        .collect();
+    scan(resolve_now(), PathBuf::from(&config.root), &entries)
 }
 
 /// Orchestrate a full scan from a parsed `Config`. Enumerates configured repos in order, scans
@@ -523,15 +540,7 @@ pub fn expand_home(path: &str) -> PathBuf {
 /// the sorted table. A configured-but-absent/unreadable repo lands in `skipped` (scan continues,
 /// exit SUCCESS) — never silently dropped.
 pub fn scan_config(config: &Config) -> MarkerTable {
-    let entries: Vec<(String, PathBuf, Option<Lang>)> = config
-        .repos
-        .iter()
-        .map(|r| {
-            let lang = r.lang.as_deref().map(Lang::from_label);
-            (r.name.clone(), expand_home(&r.path), lang)
-        })
-        .collect();
-    scan(resolve_now(), PathBuf::from(&config.root), &entries)
+    scan_config_under(config, std::env::var("HOME").ok().as_deref())
 }
 
 #[cfg(test)]
@@ -1048,31 +1057,32 @@ mod tests {
 
     #[test]
     fn expand_home_resolves_leading_tilde_only() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = std::env::var("HOME").ok();
-        std::env::set_var("HOME", "/home/zz");
-        assert_eq!(expand_home("~"), PathBuf::from("/home/zz"));
+        let home = "/home/zz";
         assert_eq!(
-            expand_home("~/repos/reverie"),
+            expand_home_under("~", Some(home)),
+            PathBuf::from("/home/zz")
+        );
+        assert_eq!(
+            expand_home_under("~/repos/reverie", Some(home)),
             PathBuf::from("/home/zz/repos/reverie")
         );
         // No leading tilde → unchanged; an interior `~` is NOT a home reference.
-        assert_eq!(expand_home("/abs/path"), PathBuf::from("/abs/path"));
-        assert_eq!(expand_home("rel/~/x"), PathBuf::from("rel/~/x"));
-        match saved {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
+        assert_eq!(
+            expand_home_under("/abs/path", Some(home)),
+            PathBuf::from("/abs/path")
+        );
+        assert_eq!(
+            expand_home_under("rel/~/x", Some(home)),
+            PathBuf::from("rel/~/x")
+        );
     }
 
     #[test]
     fn scan_config_expands_tilde_path_into_a_row_not_a_skip() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = std::env::var("HOME").ok();
         // A fake HOME holding one real (empty) repo dir; the config addresses it via `~/myrepo`.
         let home = tmp("fakehome");
         fs::create_dir_all(home.join("myrepo")).unwrap();
-        std::env::set_var("HOME", &home);
+        let home_str = home.to_string_lossy();
         let cfg = Config {
             root: "~/".into(),
             repos: vec![RepoEntry {
@@ -1081,12 +1091,7 @@ mod tests {
                 lang: None,
             }],
         };
-        let table = scan_config(&cfg);
-        // Restore HOME before asserting, so a failed assert can't leak the override.
-        match saved {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
+        let table = scan_config_under(&cfg, Some(&home_str));
         assert_eq!(table.rows.len(), 1, "tilde path must expand+scan to a row");
         assert_eq!(table.rows[0].name, "myrepo");
         assert!(

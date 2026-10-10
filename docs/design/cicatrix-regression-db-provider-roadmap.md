@@ -193,10 +193,11 @@ sequenceDiagram
     * `validate`: Execute the rollback in a speculative sandbox; confirm clean baseline restoration and zero uncompensated side effects.
     * `decide`: Return `AutoCommit`, `AutoCommitWithNotice`, `RouteToApproval`, or `Block` based on autonomy ladder tier (`Shadow`, `Supervised`, `Autonomous`).
   * Wired CLI subcommand `cicatrix reversibility <eval|classify|plan|validate>` and MCP tool `cicatrix_verify_reversibility`.
-* [ ] **Milestone 3.2: Synthetic Canary Tripwire Registry (`crm-core-tripwire`)**
-  * Seed synthetic regression entries (`tripwire_canaries`) in the database with known sentinel markers.
-  * Implement `tripwire_touches` audit logging.
-  * Trigger immediate fail-closed circuit breaking and Cortex security notifications if an agent edits or queries canaries without authorization.
+* [x] **Milestone 3.2: Synthetic Canary Tripwire Registry (`crm-core-tripwire` / `CER-2760`)**
+  * Seeded synthetic regression entries (`tripwire_canaries`) in the database with known sentinel markers and `:db/neverZeroValue` validation.
+  * Implemented `tripwire_touches` audit logging table to capture actor, action type, verdict, and notification status.
+  * Enforced immediate fail-closed circuit breaking and Cortex security notifications (`cortex-msg send coordinator "security:canary-tripwire"`) upon unauthorized agent touch.
+  * Added `cicatrix tripwire <list|check|touches|seed>` CLI command, guarded `cicatrix query` and `cicatrix reversibility`, and exposed `cicatrix_check_tripwire` MCP tool with fail-closed query/diff guards.
 * [ ] **Milestone 3.3: Unified Error Masking**
   * Mask all 5xx internal server errors across CLI, REST, and MCP surfaces behind `ref_`-prefixed identifiers.
   * Strip internal file paths and credentials from error responses.

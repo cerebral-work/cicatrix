@@ -7,6 +7,8 @@
 //! - `cicatrix_start_workflow`
 //! - `cicatrix_workflow_status`
 //! - `cicatrix_submit_signal`
+//! - `cicatrix_verify_reversibility`
+//! - `cicatrix_check_tripwire`
 
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -236,6 +238,36 @@ pub fn mcp_tools() -> Vec<McpToolDefinition> {
                 "required": ["diff"]
             }),
         },
+        McpToolDefinition {
+            name: "cicatrix_check_tripwire".to_string(),
+            description: "Check if a target path or content touches any synthetic canary tripwires, verifying actor authorization and failing closed upon unauthorized intrusion.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Target file path or pattern to evaluate against tripwire registry"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Optional diff or file content to scan for canary sentinel markers"
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Identity or role of the agent or operator initiating the check (default: CICATRIX_ACTOR or 'agent')"
+                    },
+                    "action": {
+                        "type": "string",
+                        "description": "Action type being performed (default: 'check')"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Optional snapshot branch identifier"
+                    }
+                },
+                "required": ["target"]
+            }),
+        },
     ]
 }
 
@@ -328,6 +360,7 @@ pub async fn execute_tool(name: &str, args: &Value) -> Result<Value, ToolExecuti
         "cicatrix_workflow_status" => handle_workflow_status(args),
         "cicatrix_submit_signal" => handle_submit_signal(args).await,
         "cicatrix_verify_reversibility" => handle_verify_reversibility(args),
+        "cicatrix_check_tripwire" => handle_check_tripwire(args),
         other => Err(ToolExecutionError::Client(format!(
             "unknown tool `{other}`"
         ))),
@@ -355,8 +388,25 @@ fn handle_query_known_bugs(args: &Value) -> Result<Value, ToolExecutionError> {
         .get("limit")
         .and_then(Value::as_u64)
         .map(|l| l as usize);
+    let actor = args
+        .get("actor")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .or_else(|| {
+            std::env::var("CICATRIX_ACTOR")
+                .ok()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+        })
+        .unwrap_or_else(|| "agent".to_string());
 
     let store = open_store_target(branch)?;
+
+    // Fail-closed synthetic canary tripwire check (CER-2760, Phase 3.2)
+    store
+        .guard_paths(&paths, &actor, "mcp_query")
+        .map_err(|e| ToolExecutionError::Client(format!("tripwire intrusion detected: {e}")))?;
+
     let mut hits = store.touches_known_bug(&paths).map_err(|e| {
         ToolExecutionError::Internal(format!("query touches_known_bug failed: {e}"))
     })?;
@@ -398,6 +448,17 @@ fn handle_verify_diff(args: &Value) -> Result<Value, ToolExecutionError> {
     let branch = args.get("branch").and_then(Value::as_str);
     let as_of = args.get("as_of").and_then(Value::as_str);
     let frontier_str = args.get("frontier").and_then(Value::as_str);
+    let actor = args
+        .get("actor")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .or_else(|| {
+            std::env::var("CICATRIX_ACTOR")
+                .ok()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+        })
+        .unwrap_or_else(|| "agent".to_string());
 
     let touched_files = parse_diff_touched_files(diff);
     if touched_files.is_empty() {
@@ -413,6 +474,12 @@ fn handle_verify_diff(args: &Value) -> Result<Value, ToolExecutionError> {
     let has_test_coverage = touched_files.iter().any(|f| is_test_file(f));
 
     let store = open_store_target(branch)?;
+
+    // Fail-closed synthetic canary tripwire check (CER-2760, Phase 3.2)
+    store
+        .guard_diff(diff, &actor)
+        .map_err(|e| ToolExecutionError::Client(format!("tripwire intrusion detected: {e}")))?;
+
     let mut hits = store
         .touches_known_bug(&touched_files)
         .map_err(|e| ToolExecutionError::Internal(format!("touches_known_bug failed: {e}")))?;
@@ -760,6 +827,24 @@ fn handle_verify_reversibility(args: &Value) -> Result<Value, ToolExecutionError
         ));
     }
 
+    let branch = args.get("branch").and_then(Value::as_str);
+    let actor = args
+        .get("actor")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .or_else(|| {
+            std::env::var("CICATRIX_ACTOR")
+                .ok()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+        })
+        .unwrap_or_else(|| "agent".to_string());
+
+    let store = open_store_target(branch)?;
+    store
+        .guard_diff(diff, &actor)
+        .map_err(|e| ToolExecutionError::Client(format!("tripwire intrusion detected: {e}")))?;
+
     let tier_str = args
         .get("tier")
         .and_then(Value::as_str)
@@ -809,6 +894,43 @@ fn handle_verify_reversibility(args: &Value) -> Result<Value, ToolExecutionError
     }
 }
 
+fn handle_check_tripwire(args: &Value) -> Result<Value, ToolExecutionError> {
+    let target = args.get("target").and_then(Value::as_str).ok_or_else(|| {
+        ToolExecutionError::Client("missing required parameter `target`".to_string())
+    })?;
+    let content = args.get("content").and_then(Value::as_str);
+    let branch = args.get("branch").and_then(Value::as_str);
+    let actor = args
+        .get("actor")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .or_else(|| {
+            std::env::var("CICATRIX_ACTOR")
+                .ok()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+        })
+        .unwrap_or_else(|| "agent".to_string());
+    let action = args
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("check");
+
+    let store = open_store_target(branch)?;
+    match store.guard_check(target, content, &actor, action) {
+        Ok(()) => Ok(json!({
+            "status": "clear",
+            "verdict": "permitted",
+            "target": target,
+            "actor": actor,
+            "action": action,
+        })),
+        Err(e) => Err(ToolExecutionError::Client(format!(
+            "tripwire intrusion detected: {e}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,11 +938,13 @@ mod tests {
     #[test]
     fn test_mcp_tools_list_completeness() {
         let tools = mcp_tools();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"cicatrix_query_known_bugs"));
         assert!(names.contains(&"cicatrix_verify_diff"));
         assert!(names.contains(&"cicatrix_record_defect"));
+        assert!(names.contains(&"cicatrix_verify_reversibility"));
+        assert!(names.contains(&"cicatrix_check_tripwire"));
         assert!(names.contains(&"cicatrix_start_workflow"));
         assert!(names.contains(&"cicatrix_workflow_status"));
         assert!(names.contains(&"cicatrix_submit_signal"));
@@ -899,7 +1023,7 @@ new file mode 100644
             ToolExecutionError::Client(msg) => {
                 assert!(msg.contains(":db/neverZeroValue violation"));
             }
-            ToolExecutionError::Internal(_) => panic!("expected client error"),
+            ToolExecutionError::Internal(e) => panic!("expected client error, got Internal({e})"),
         }
     }
 
@@ -919,5 +1043,74 @@ diff --git a/tests/new_test.rs b/tests/new_test.rs
         let touched = res["touched_files"].as_array().unwrap();
         assert_eq!(touched.len(), 1);
         assert_eq!(touched[0], "tests/new_test.rs");
+    }
+
+    #[tokio::test]
+    async fn test_tripwire_check_authorized_and_unauthorized() {
+        // Authorized operator check passes
+        let op_args = json!({
+            "target": ".cicatrix/sentinel/canary_alpha.rs",
+            "actor": "operator"
+        });
+        let res = handle_check_tripwire(&op_args).expect("operator check should be permitted");
+        assert_eq!(res["status"], "clear");
+        assert_eq!(res["verdict"], "permitted");
+
+        // Unauthorized agent check trips circuit breaker
+        let agent_args = json!({
+            "target": ".cicatrix/sentinel/canary_alpha.rs",
+            "actor": "unauthorized-agent"
+        });
+        let err = handle_check_tripwire(&agent_args).expect_err("agent check should tripwire");
+        match err {
+            ToolExecutionError::Client(msg) => {
+                assert!(msg.contains("tripwire intrusion detected"));
+                assert!(msg.contains("TRIPWIRE_CANARY_SENTINEL_ALPHA"));
+            }
+            ToolExecutionError::Internal(e) => {
+                panic!("expected client error on intrusion, got Internal({e})")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_known_bugs_blocks_tripwire_path() {
+        let args = json!({
+            "paths": [".cicatrix/sentinel/canary_alpha.rs"],
+            "actor": "suspicious-crawler"
+        });
+        let err = handle_query_known_bugs(&args).expect_err("querying tripwire path should fail");
+        match err {
+            ToolExecutionError::Client(msg) => {
+                assert!(msg.contains("tripwire intrusion detected"));
+            }
+            ToolExecutionError::Internal(e) => {
+                panic!("expected client error on intrusion, got Internal({e})")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_diff_blocks_tripwire_sentinel() {
+        let diff = r#"
+diff --git a/src/secrets.rs b/src/secrets.rs
+--- a/src/secrets.rs
++++ b/src/secrets.rs
+@@ -1,1 +1,2 @@
++// TRIPWIRE_MARKER_CREDENTIAL_CANARY_DO_NOT_READ
+"#;
+        let args = json!({
+            "diff": diff,
+            "actor": "rogue-agent"
+        });
+        let err = handle_verify_diff(&args).expect_err("diff with sentinel must be blocked");
+        match err {
+            ToolExecutionError::Client(msg) => {
+                assert!(msg.contains("tripwire intrusion detected"));
+            }
+            ToolExecutionError::Internal(e) => {
+                panic!("expected client error on intrusion, got Internal({e})")
+            }
+        }
     }
 }

@@ -1611,3 +1611,278 @@ index 0000000..3333333
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("\"verdict\": \"route_to_approval\""));
 }
+
+fn run_with_env(args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut cmd = Command::new(BIN);
+    cmd.args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("failed to spawn cicatrix binary")
+}
+
+fn run_with_env_and_stdin(args: &[&str], envs: &[(&str, &str)], input: &str) -> Output {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut cmd = Command::new(BIN);
+    cmd.args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("failed to spawn cicatrix binary");
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+    }
+    child.wait_with_output().expect("failed to wait on child")
+}
+
+#[test]
+fn tripwire_usage_errors() {
+    let out = run(&["tripwire"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: cicatrix tripwire"));
+
+    let out = run(&["tripwire", "unknown_verb"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown subcommand `unknown_verb`"));
+
+    let out = run(&["tripwire", "check"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: cicatrix tripwire check"));
+
+    let out = run(&["tripwire", "touches", "--limit", "abc"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--limit requires a positive integer"));
+}
+
+#[test]
+fn tripwire_list_and_seed_cli() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("tripwire_list.db");
+    let db_str = db_path.to_str().unwrap();
+    let envs = [("CICATRIX_DB_PATH", db_str)];
+
+    // 1. Text list output
+    let out = run_with_env(&["tripwire", "list"], &envs);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Registered Synthetic Canaries"));
+    assert!(stdout.contains("TRIPWIRE_CANARY_SENTINEL_ALPHA"));
+    assert!(stdout.contains(".cicatrix/sentinel/canary_alpha.rs"));
+
+    // 2. JSON list output
+    let out_json = run_with_env(&["tripwire", "list", "--json"], &envs);
+    assert!(out_json.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out_json.stdout).expect("valid json");
+    let arr = v.as_array().expect("array of canaries");
+    assert!(arr.len() >= 4, "expected at least 4 default canaries");
+    assert!(arr
+        .iter()
+        .any(|c| c["id"] == "TRIPWIRE_CANARY_SENTINEL_ALPHA"));
+
+    // 3. Seed idempotent execution
+    let out_seed = run_with_env(&["tripwire", "seed"], &envs);
+    assert!(out_seed.status.success());
+    let stdout = String::from_utf8_lossy(&out_seed.stdout);
+    assert!(stdout.contains("Seeded 0 synthetic canaries into tripwire registry"));
+}
+
+#[test]
+fn tripwire_check_and_touches_cli() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("tripwire_check.db");
+    let db_str = db_path.to_str().unwrap();
+    let envs = [
+        ("CICATRIX_DB_PATH", db_str),
+        ("CICATRIX_TRIPWIRE_MOCK_NOTIFY", "1"),
+    ];
+
+    // 1. Authorized check passes
+    let out = run_with_env(
+        &[
+            "tripwire",
+            "check",
+            ".cicatrix/sentinel/canary_alpha.rs",
+            "--actor",
+            "operator",
+        ],
+        &envs,
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Tripwire check clear: permitted for actor `operator`"));
+
+    // 2. Authorized check JSON output
+    let out_json = run_with_env(
+        &[
+            "tripwire",
+            "check",
+            ".cicatrix/sentinel/canary_alpha.rs",
+            "--actor",
+            "operator",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(out_json.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out_json.stdout).expect("valid json");
+    assert_eq!(v["status"], "clear");
+    assert_eq!(v["verdict"], "permitted");
+
+    // 3. Unauthorized check trips circuit breaker (fail-closed)
+    let out_trip = run_with_env(
+        &[
+            "tripwire",
+            "check",
+            ".cicatrix/sentinel/canary_alpha.rs",
+            "--actor",
+            "unauthorized_agent",
+        ],
+        &envs,
+    );
+    assert!(!out_trip.status.success());
+    let stderr = String::from_utf8_lossy(&out_trip.stderr);
+    assert!(stderr.contains("intrusion detected"));
+    assert!(stderr.contains("TRIPWIRE_CANARY_SENTINEL_ALPHA"));
+
+    // 4. Unauthorized check JSON output
+    let out_trip_json = run_with_env(
+        &[
+            "tripwire",
+            "check",
+            ".cicatrix/sentinel/canary_alpha.rs",
+            "--actor",
+            "unauthorized_agent",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(!out_trip_json.status.success());
+    let v: serde_json::Value =
+        serde_json::from_slice(&out_trip_json.stdout).expect("valid json output on tripped check");
+    assert_eq!(v["status"], "tripped");
+    assert_eq!(v["error"], "tripwire_intrusion_detected");
+    assert_eq!(v["canary_id"], "TRIPWIRE_CANARY_SENTINEL_ALPHA");
+    assert_eq!(v["cortex_notified"], true);
+
+    // 5. Touches audit log listing
+    let out_touches = run_with_env(&["tripwire", "touches"], &envs);
+    assert!(out_touches.status.success());
+    let stdout = String::from_utf8_lossy(&out_touches.stdout);
+    assert!(stdout.contains("Tripwire Touch Events"));
+    assert!(stdout.contains("canary=TRIPWIRE_CANARY_SENTINEL_ALPHA"));
+    assert!(stdout.contains("actor=unauthorized_agent"));
+    assert!(stdout.contains("verdict=circuit_broken"));
+
+    // 6. Touches filtered by canary with JSON output
+    let out_touches_json = run_with_env(
+        &[
+            "tripwire",
+            "touches",
+            "--canary",
+            "TRIPWIRE_CANARY_SENTINEL_ALPHA",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(out_touches_json.status.success());
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_slice(&out_touches_json.stdout).expect("valid touches array json");
+    assert!(!arr.is_empty());
+    assert!(arr
+        .iter()
+        .any(|t| t["verdict"] == "circuit_broken" && t["actor"] == "unauthorized_agent"));
+}
+
+#[test]
+fn query_cli_fails_closed_on_tripwire_canary() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("query_tripwire.db");
+    let db_str = db_path.to_str().unwrap();
+    let envs = [
+        ("CICATRIX_DB_PATH", db_str),
+        ("CICATRIX_TRIPWIRE_MOCK_NOTIFY", "1"),
+    ];
+
+    let out = run_with_env(
+        &[
+            "query",
+            ".cicatrix/sentinel/canary_alpha.rs",
+            "--actor",
+            "unauthorized_reader",
+        ],
+        &envs,
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("tripwire intrusion detected"));
+    assert!(stderr.contains("TRIPWIRE_CANARY_SENTINEL_ALPHA"));
+}
+
+#[test]
+fn reversibility_eval_fails_closed_on_tripwire_marker() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("rev_tripwire.db");
+    let db_str = db_path.to_str().unwrap();
+    let envs = [
+        ("CICATRIX_DB_PATH", db_str),
+        ("CICATRIX_TRIPWIRE_MOCK_NOTIFY", "1"),
+    ];
+
+    let sentinel_diff = r#"
+diff --git a/src/token.rs b/src/token.rs
+--- a/src/token.rs
++++ b/src/token.rs
+@@ -1,1 +1,2 @@
++// TRIPWIRE_MARKER_CREDENTIAL_CANARY_DO_NOT_READ
+"#;
+
+    // Plain output format
+    let out = run_with_env_and_stdin(
+        &[
+            "reversibility",
+            "eval",
+            "--diff",
+            "-",
+            "--actor",
+            "untrusted_agent",
+        ],
+        &envs,
+        sentinel_diff,
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("tripwire intrusion detected"));
+    assert!(stderr.contains("TRIPWIRE_CANARY_AUTH_TOKEN"));
+
+    // JSON error format
+    let out_json = run_with_env_and_stdin(
+        &[
+            "reversibility",
+            "eval",
+            "--diff",
+            "-",
+            "--actor",
+            "untrusted_agent",
+            "--json",
+        ],
+        &envs,
+        sentinel_diff,
+    );
+    assert!(!out_json.status.success());
+    let stderr = String::from_utf8_lossy(&out_json.stderr);
+    let v: serde_json::Value = serde_json::from_str(&stderr)
+        .expect("valid json error output on tripped reversibility eval");
+    assert_eq!(v["error"], "tripwire_intrusion_detected");
+    assert_eq!(v["canary_id"], "TRIPWIRE_CANARY_AUTH_TOKEN");
+    assert_eq!(v["cortex_notified"], true);
+}

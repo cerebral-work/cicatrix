@@ -28,7 +28,7 @@ autumn-harvest = { version = "0.7.0", default-features = false }
 autumn-harvest-macros = "0.7.0"
 autumn-harvest-sqlite = "0.7.0"
 rusqlite = { version = "0.40", features = ["bundled"] }
-tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net", "io-util"] }
 
 [dev-dependencies]
 tempfile = "3"

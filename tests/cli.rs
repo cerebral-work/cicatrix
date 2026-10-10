@@ -1173,3 +1173,194 @@ fn workflow_triage_require_review_cli() {
     assert!(stdout.contains("rejected"));
     assert!(stdout.contains("Culprit rejected pending investigation"));
 }
+
+#[test]
+fn mcp_stdio_initialize_and_tools_list_cli() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+
+    let mut child = Command::new(BIN)
+        .arg("mcp")
+        .arg("--stdio")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn cicatrix mcp --stdio");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+
+    // 1. Send initialize
+    let init_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {}
+    });
+    let mut init_line = serde_json::to_string(&init_req).unwrap();
+    init_line.push('\n');
+    stdin.write_all(init_line.as_bytes()).unwrap();
+    stdin.flush().unwrap();
+
+    let mut resp_line = String::new();
+    reader.read_line(&mut resp_line).unwrap();
+    let resp: serde_json::Value = serde_json::from_str(&resp_line).expect("valid json response");
+    assert_eq!(resp["id"], 1);
+    assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(resp["result"]["serverInfo"]["name"], "cicatrix");
+
+    // 2. Send tools/list
+    let list_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list"
+    });
+    let mut list_line = serde_json::to_string(&list_req).unwrap();
+    list_line.push('\n');
+    stdin.write_all(list_line.as_bytes()).unwrap();
+    stdin.flush().unwrap();
+
+    let mut resp_line2 = String::new();
+    reader.read_line(&mut resp_line2).unwrap();
+    let resp2: serde_json::Value = serde_json::from_str(&resp_line2).expect("valid json response");
+    assert_eq!(resp2["id"], 2);
+    let tools = resp2["result"]["tools"].as_array().expect("tools array");
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"cicatrix_query_known_bugs"));
+    assert!(names.contains(&"cicatrix_verify_diff"));
+    assert!(names.contains(&"cicatrix_record_defect"));
+    assert!(names.contains(&"cicatrix_start_workflow"));
+    assert!(names.contains(&"cicatrix_workflow_status"));
+    assert!(names.contains(&"cicatrix_submit_signal"));
+
+    // 3. Send tools/call for cicatrix_verify_diff
+    let call_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "cicatrix_verify_diff",
+            "arguments": {
+                "diff": "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,2 @@\n+pub fn test() {}\n"
+            }
+        }
+    });
+    let mut call_line = serde_json::to_string(&call_req).unwrap();
+    call_line.push('\n');
+    stdin.write_all(call_line.as_bytes()).unwrap();
+    stdin.flush().unwrap();
+
+    let mut resp_line3 = String::new();
+    reader.read_line(&mut resp_line3).unwrap();
+    let resp3: serde_json::Value = serde_json::from_str(&resp_line3).expect("valid json response");
+    assert_eq!(resp3["id"], 3);
+    assert!(resp3["result"]["content"].is_array());
+
+    // Drop stdin to close pipe cleanly
+    drop(stdin);
+    let status = child.wait().expect("wait on child");
+    assert!(status.success());
+}
+
+#[test]
+fn mcp_http_server_endpoints_cli() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    // Pick a free random port
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let bind_addr = format!("127.0.0.1:{port}");
+
+    let mut child = Command::new(BIN)
+        .arg("serve")
+        .arg("--mcp")
+        .arg("--bind")
+        .arg(&bind_addr)
+        .spawn()
+        .expect("failed to spawn cicatrix serve --mcp");
+
+    // Wait until server is reachable (up to 5 seconds)
+    let mut connected = false;
+    for _ in 0..50 {
+        if let Ok(mut stream) = TcpStream::connect(&bind_addr) {
+            let req =
+                format!("GET /health HTTP/1.1\r\nHost: {bind_addr}\r\nConnection: close\r\n\r\n");
+            if stream.write_all(req.as_bytes()).is_ok() {
+                let mut res = String::new();
+                if stream.read_to_string(&mut res).is_ok() && res.contains("200 OK") {
+                    connected = true;
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(connected, "HTTP server did not become ready in time");
+
+    // 1. GET /health
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let req = format!("GET /health HTTP/1.1\r\nHost: {bind_addr}\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"));
+        assert!(res.contains("\"status\":\"ok\""));
+        assert!(res.contains("\"service\":\"cicatrix-mcp\""));
+    }
+
+    // 2. POST /mcp (JSON-RPC initialize)
+    {
+        let mut stream = TcpStream::connect(&bind_addr).expect("connect to server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let json_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "initialize",
+            "params": {}
+        })
+        .to_string();
+
+        let req = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {bind_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json_body.len(),
+            json_body
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+
+        let mut res = String::new();
+        stream.read_to_string(&mut res).unwrap();
+        assert!(res.contains("200 OK"));
+        assert!(res.contains("\"id\":42"));
+        assert!(res.contains("\"protocolVersion\":\"2024-11-05\""));
+    }
+
+    // Kill child process
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn mcp_usage_errors() {
+    let out = run(&["mcp", "--unknown"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown flag --unknown"));
+
+    let out = run(&["serve", "--invalid"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown flag --invalid"));
+}

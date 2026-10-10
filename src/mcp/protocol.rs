@@ -5,8 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const JSONRPC_VERSION: &str = "2.0";
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -17,17 +15,7 @@ pub const METHOD_NOT_FOUND: i32 = -32601;
 pub const INVALID_PARAMS: i32 = -32602;
 pub const INTERNAL_ERROR: i32 = -32603;
 
-static CORRELATION_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-/// Generate a correlation identifier with the `ref_` prefix per EARS spec and Wheelhorse policy.
-pub fn generate_correlation_id() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let count = CORRELATION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("ref_{:x}_{:04x}", now, count & 0xffff)
-}
+pub use crate::masking::generate_correlation_id;
 
 /// Incoming JSON-RPC 2.0 Request or Notification.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -107,8 +95,10 @@ impl JsonRpcError {
 
     /// Masked 5xx internal server error returning generic message with a `ref_` correlation ID.
     pub fn internal_masked(err_details: &str) -> (Self, String) {
-        let ref_id = generate_correlation_id();
-        eprintln!("[cicatrix-mcp] internal error [{ref_id}]: {err_details}");
+        let masked = crate::masking::MaskedError::internal(err_details);
+        let ref_id = masked
+            .correlation_id
+            .unwrap_or_else(crate::masking::generate_correlation_id);
         (
             Self {
                 code: INTERNAL_ERROR,

@@ -6,6 +6,7 @@ mod drift;
 pub mod frontier;
 mod gitf;
 pub mod hooks;
+pub mod masking;
 pub mod mcp;
 mod reverie;
 pub mod reversibility;
@@ -182,7 +183,11 @@ fn cmd_record(rest: &[String]) -> ExitCode {
                     println!("recorded {} → branch {} (sqlite)", f.id, branch_id);
                     recorded += 1;
                 }
-                Err(e) => eprintln!("cicatrix record: {} failed: {e}", f.id),
+                Err(e) => {
+                    let masked =
+                        crate::masking::MaskedError::internal(format!("{} failed: {e}", f.id));
+                    eprintln!("{}", masked.to_cli_string("cicatrix record"));
+                }
             }
         }
         if recorded == facts.len() {
@@ -213,7 +218,11 @@ fn cmd_record(rest: &[String]) -> ExitCode {
                     }
                     recorded += 1;
                 }
-                Err(e) => eprintln!("cicatrix record: {} failed: {e}", f.id),
+                Err(e) => {
+                    let masked =
+                        crate::masking::MaskedError::internal(format!("{} failed: {e}", f.id));
+                    eprintln!("{}", masked.to_cli_string("cicatrix record"));
+                }
             }
         }
         if recorded == facts.len() {
@@ -324,7 +333,8 @@ fn cmd_query(rest: &[String]) -> ExitCode {
         match branch_store.touches_known_bug(&files) {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("cicatrix query: {e}");
+                let masked = crate::masking::MaskedError::internal(format!("{e}"));
+                eprintln!("{}", masked.to_cli_string("cicatrix query"));
                 return ExitCode::FAILURE;
             }
         }
@@ -332,7 +342,10 @@ fn cmd_query(rest: &[String]) -> ExitCode {
         let store = match store::SqliteStore::from_env() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("cicatrix query: failed to open sqlite database for tripwire check: {e}");
+                let masked = crate::masking::MaskedError::internal(format!(
+                    "failed to open sqlite database for tripwire check: {e}"
+                ));
+                eprintln!("{}", masked.to_cli_string("cicatrix query"));
                 return ExitCode::FAILURE;
             }
         };
@@ -345,7 +358,8 @@ fn cmd_query(rest: &[String]) -> ExitCode {
         match bridge.touches_known_bug(&files) {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("cicatrix query: {e}");
+                let masked = crate::masking::MaskedError::internal(format!("{e}"));
+                eprintln!("{}", masked.to_cli_string("cicatrix query"));
                 return ExitCode::FAILURE;
             }
         }

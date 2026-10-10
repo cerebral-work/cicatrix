@@ -1,0 +1,4 @@
+# EARS specification marker - cicatrix
+methodology: EARS (Easy Approach to Requirements Syntax)
+specification_schema: headless-v1
+reference_standards: standards/ears/

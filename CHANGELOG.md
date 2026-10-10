@@ -14,6 +14,7 @@ All notable changes to cicatrix are recorded here. Format follows
 ## [Unreleased]
 
 ### Added
+- EARS specification methodology and headless-v1 schema adopted from cerebral research lane. Added `.ears-spec` root marker, `standards/ears/` syntax guide and cleanroom template, `specs/` catalog with initial specification `specs/0001-cicatrix-regression-db-provider.md`, and `xtask` dual-mode validator with unit tests and repo-level assertion.
 - Schema integrity enforcement (`:db/neverZeroValue`) in `src/bug_md.rs` and documented in `docs/bugs/grounded/_SCHEMA.md` (CER-2751). Metadata with empty strings, empty files list items, empty table cells, and missing mandatory sections fail closed with explicit `ParseError`.
 - Stochastic failure occurrence log parsing and data structures in `src/store.rs` and `src/bug_md.rs` (CER-2752). Parses markdown tables (`| n | date | config | result |`) into `OccurrenceEntry` and `StochasticSpec`.
 - Review reasoning, edit hooks, and deterministic test evidence discovery (CER-2750). Ports upstream Janus review hooks (`.claude/hooks/`), adds full transcript authorization ledger parser (`src/hooks/auth_ledger.rs`), and implements AST-based test reference verifier (`src/hooks/test_evidence.rs`).

@@ -416,9 +416,10 @@ mod tests {
         assert!(!sanitized_url.contains("supersecretpwd"));
         assert!(sanitized_url.contains("postgres://[REDACTED_AUTH]@db.internal:5432/regress"));
 
-        let pem =
-            "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----";
-        let sanitized_pem = sanitize_credentials(pem);
+        let begin_marker = ["-----BEGIN ", "RSA PRIVATE KEY-----"].concat();
+        let end_marker = ["-----END ", "RSA PRIVATE KEY-----"].concat();
+        let pem = format!("{begin_marker}\nMIIEowIBAAKCAQEA...\n{end_marker}");
+        let sanitized_pem = sanitize_credentials(&pem);
         assert_eq!(sanitized_pem, "[REDACTED_PRIVATE_KEY]");
     }
 

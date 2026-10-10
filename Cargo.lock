@@ -295,11 +295,14 @@ dependencies = [
 name = "cicatrix"
 version = "0.0.0"
 dependencies = [
+ "autumn-harvest",
+ "autumn-harvest-macros",
  "autumn-harvest-sqlite",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "ureq",
 ]
 

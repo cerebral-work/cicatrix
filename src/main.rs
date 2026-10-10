@@ -7,7 +7,8 @@ pub mod frontier;
 mod gitf;
 pub mod hooks;
 mod reverie;
-mod store;
+pub mod store;
+pub mod workflow;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -29,12 +30,15 @@ fn main() -> ExitCode {
         "project-meta" => cmd_project_meta(&args[1..]),
         // print newest scan path (bare) or regenerate the convention-drift table (`drift scan`)
         "drift" => cmd_drift(&args[1..]),
+        // Autumn Harvest durable workflow engine integration (CER-2756, Phase 2.1)
+        "workflow" => cmd_workflow(&args[1..]),
         _ => {
             eprintln!(
                 "usage: cicatrix <inject [--target <path>] | record [<BUG_*.md>...] [--branch <id>] | \
                  query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>] | \
                  branch <fork <id> [--from <base>] [--frontier <vec>] | drop <id> | settle <id> | list | path <id>> | \
-                 project-meta [--apply] | drift [scan [--repo <path>]]>"
+                 project-meta [--apply] | drift [scan [--repo <path>]] | \
+                 workflow <run <triage|audit> | list | status <id>>>"
             );
             ExitCode::FAILURE
         }
@@ -830,6 +834,432 @@ fn unified_diff(old: &str, new: &str, label: &str) -> String {
         out.push_str(&format!("+{line}\n"));
     }
     out
+}
+
+/// Dispatch workflow subcommands for the Autumn Harvest engine (CER-2756).
+fn cmd_workflow(rest: &[String]) -> ExitCode {
+    match rest.first().map(String::as_str) {
+        Some("run") => cmd_workflow_run(&rest[1..]),
+        Some("list") => cmd_workflow_list(&rest[1..]),
+        Some("status") => cmd_workflow_status(&rest[1..]),
+        Some(other) => {
+            eprintln!("cicatrix workflow: unknown subcommand `{other}`");
+            eprintln!("usage: cicatrix workflow <run <triage|audit> [options] | list [--db <path>] | status <id> [--db <path>]>");
+            ExitCode::FAILURE
+        }
+        None => {
+            eprintln!("usage: cicatrix workflow <run <triage|audit> [options] | list [--db <path>] | status <id> [--db <path>]>");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run a registered workflow by name.
+fn cmd_workflow_run(rest: &[String]) -> ExitCode {
+    match rest.first().map(String::as_str) {
+        Some("triage") => cmd_workflow_run_triage(&rest[1..]),
+        Some("audit") => cmd_workflow_run_audit(&rest[1..]),
+        Some(other) => {
+            eprintln!("cicatrix workflow run: unknown workflow `{other}`");
+            eprintln!(
+                "usage: cicatrix workflow run <triage <signature> [options] | audit [options]>"
+            );
+            ExitCode::FAILURE
+        }
+        None => {
+            eprintln!(
+                "usage: cicatrix workflow run <triage <signature> [options] | audit [options]>"
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Execute regression triage workflow.
+fn cmd_workflow_run_triage(rest: &[String]) -> ExitCode {
+    let mut signature: Option<String> = None;
+    let mut repo: Option<String> = None;
+    let mut candidates = Vec::new();
+    let mut failure_log = String::new();
+    let mut reproducer_file: Option<String> = None;
+    let mut db_path_opt: Option<String> = None;
+
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--repo" => match it.next() {
+                Some(r) => repo = Some(r.clone()),
+                None => {
+                    eprintln!("cicatrix workflow run triage: --repo needs a path");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--candidate" => match it.next() {
+                Some(c) => candidates.push(c.clone()),
+                None => {
+                    eprintln!("cicatrix workflow run triage: --candidate needs a commit sha/ref");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--failure-log" => match it.next() {
+                Some(l) => failure_log = l.clone(),
+                None => {
+                    eprintln!("cicatrix workflow run triage: --failure-log needs text");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--file" => match it.next() {
+                Some(f) => reproducer_file = Some(f.clone()),
+                None => {
+                    eprintln!("cicatrix workflow run triage: --file needs a path");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--db" => match it.next() {
+                Some(d) => db_path_opt = Some(d.clone()),
+                None => {
+                    eprintln!("cicatrix workflow run triage: --db needs a path");
+                    return ExitCode::FAILURE;
+                }
+            },
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix workflow run triage: unknown flag {flag}");
+                return ExitCode::FAILURE;
+            }
+            pos => {
+                if signature.is_none() {
+                    signature = Some(pos.to_string());
+                } else {
+                    eprintln!("cicatrix workflow run triage: unexpected extra argument `{pos}`");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
+
+    let test_signature = match signature {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => {
+            eprintln!("usage: cicatrix workflow run triage <signature> [--repo <path>] [--candidate <commit>]... [--failure-log <text>] [--file <path>] [--db <path>]");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let db_path = match db_path_opt {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match workflow::default_workflow_db_path() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("cicatrix workflow run triage: cannot resolve workflow db path: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    let input = workflow::TriageInput {
+        test_signature,
+        target_repo: repo,
+        candidate_commits: candidates,
+        failure_log,
+        reproducer_file,
+    };
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("cicatrix workflow run triage: failed to initialize async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let result = rt.block_on(async {
+        let mut engine = workflow::WorkflowEngine::open(&db_path)?;
+        engine
+            .run_workflow::<_, workflow::TriageReport>("triage_workflow", input)
+            .await
+    });
+
+    match result {
+        Ok(report) => {
+            println!("Workflow execution: {}", report.exec_id);
+            println!("State: {}", report.state);
+            println!(
+                "Events: {} ({} bytes)",
+                report.event_count, report.byte_size
+            );
+            if let Some(output) = report.output {
+                println!("Culprit commit: {:?}", output.bisection.culprit_commit);
+                if let Some(fact) = output.candidate_bug_fact {
+                    println!("Candidate BugFact: {} (files: {:?})", fact.id, fact.files);
+                }
+                println!("Bisection summary: {}", output.bisection.summary);
+            }
+            if let Some(err) = report.error {
+                eprintln!("Workflow error: {err}");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            eprintln!("cicatrix workflow run triage: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Execute convention audit workflow.
+fn cmd_workflow_run_audit(rest: &[String]) -> ExitCode {
+    let mut repo_paths = Vec::new();
+    let mut marker: Option<String> = None;
+    let mut db_path_opt: Option<String> = None;
+
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--repo" => match it.next() {
+                Some(r) => repo_paths.push(r.clone()),
+                None => {
+                    eprintln!("cicatrix workflow run audit: --repo needs a path");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--marker" => match it.next() {
+                Some(m) => marker = Some(m.clone()),
+                None => {
+                    eprintln!("cicatrix workflow run audit: --marker needs a string");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--db" => match it.next() {
+                Some(d) => db_path_opt = Some(d.clone()),
+                None => {
+                    eprintln!("cicatrix workflow run audit: --db needs a path");
+                    return ExitCode::FAILURE;
+                }
+            },
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix workflow run audit: unknown flag {flag}");
+                return ExitCode::FAILURE;
+            }
+            pos => {
+                eprintln!("cicatrix workflow run audit: unexpected argument `{pos}`");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let db_path = match db_path_opt {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match workflow::default_workflow_db_path() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("cicatrix workflow run audit: cannot resolve workflow db path: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    let input = workflow::AuditInput {
+        repo_paths,
+        convention_marker: marker,
+        scan_labels: Vec::new(),
+    };
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("cicatrix workflow run audit: failed to initialize async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let result = rt.block_on(async {
+        let mut engine = workflow::WorkflowEngine::open(&db_path)?;
+        engine
+            .run_workflow::<_, workflow::AuditReport>("audit_workflow", input)
+            .await
+    });
+
+    match result {
+        Ok(report) => {
+            println!("Workflow execution: {}", report.exec_id);
+            println!("State: {}", report.state);
+            println!(
+                "Events: {} ({} bytes)",
+                report.event_count, report.byte_size
+            );
+            if let Some(output) = report.output {
+                println!("Scanned targets: {}", output.scanned_targets);
+                println!("Drift detected: {}", output.drift_count);
+                println!("Summary: {}", output.summary);
+                for target_res in output.results {
+                    if target_res.drift_detected {
+                        println!(
+                            " - {}: {} marker(s)",
+                            target_res.repo_path,
+                            target_res.markers_found.len()
+                        );
+                    }
+                }
+            }
+            if let Some(err) = report.error {
+                eprintln!("Workflow error: {err}");
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            eprintln!("cicatrix workflow run audit: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// List workflow executions from the database.
+fn cmd_workflow_list(rest: &[String]) -> ExitCode {
+    let mut db_path_opt: Option<String> = None;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => match it.next() {
+                Some(d) => db_path_opt = Some(d.clone()),
+                None => {
+                    eprintln!("cicatrix workflow list: --db needs a path");
+                    return ExitCode::FAILURE;
+                }
+            },
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix workflow list: unknown flag {flag}");
+                return ExitCode::FAILURE;
+            }
+            other => {
+                eprintln!("cicatrix workflow list: unexpected argument `{other}`");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let db_path = match db_path_opt {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match workflow::default_workflow_db_path() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("cicatrix workflow list: cannot resolve workflow db path: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    match workflow::list_executions_from_db(&db_path) {
+        Ok(list) => {
+            if list.is_empty() {
+                println!("No workflow executions found in {}", db_path.display());
+            } else {
+                println!(
+                    "{:<36}\t{:<20}\t{:<10}\t{:<8}\t{:<8}",
+                    "EXEC_ID", "WORKFLOW", "STATE", "EVENTS", "BYTES"
+                );
+                for item in list {
+                    println!(
+                        "{:<36}\t{:<20}\t{:<10}\t{:<8}\t{:<8}",
+                        item.exec_id,
+                        item.workflow_name,
+                        item.state,
+                        item.event_count,
+                        item.byte_size
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cicatrix workflow list: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Inspect detailed workflow execution state from the database.
+fn cmd_workflow_status(rest: &[String]) -> ExitCode {
+    let mut exec_id: Option<String> = None;
+    let mut db_path_opt: Option<String> = None;
+
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--db" => match it.next() {
+                Some(d) => db_path_opt = Some(d.clone()),
+                None => {
+                    eprintln!("cicatrix workflow status: --db needs a path");
+                    return ExitCode::FAILURE;
+                }
+            },
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix workflow status: unknown flag {flag}");
+                return ExitCode::FAILURE;
+            }
+            other => {
+                if exec_id.is_none() {
+                    exec_id = Some(other.to_string());
+                } else {
+                    eprintln!("cicatrix workflow status: unexpected argument `{other}`");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
+
+    let id = match exec_id {
+        Some(i) => i,
+        None => {
+            eprintln!("usage: cicatrix workflow status <exec_id> [--db <path>]");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let db_path = match db_path_opt {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match workflow::default_workflow_db_path() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("cicatrix workflow status: cannot resolve workflow db path: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+
+    match workflow::get_execution_detail_from_db(&db_path, &id) {
+        Ok(detail) => {
+            println!("Execution ID:  {}", detail.exec_id);
+            println!("Workflow:      {}", detail.workflow_name);
+            println!("Business ID:   {}", detail.workflow_id);
+            println!("State:         {}", detail.state);
+            println!(
+                "Events:        {} ({} bytes)",
+                detail.event_count, detail.byte_size
+            );
+            println!("Input:         {}", detail.input_json);
+            if let Some(out) = detail.output_json {
+                println!("Output:        {}", out);
+            }
+            if let Some(err) = detail.error {
+                println!("Error:         {}", err);
+            }
+            if !detail.events.is_empty() {
+                println!("Event Log ({} total):", detail.events.len());
+                for (idx, ev) in detail.events.iter().enumerate() {
+                    println!("  [{idx}] {}", ev);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cicatrix workflow status: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(test)]

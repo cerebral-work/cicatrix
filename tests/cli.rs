@@ -885,3 +885,109 @@ fn branch_record_query_isolation_and_settle() {
 
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn workflow_usage_errors() {
+    let out = run(&["workflow"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: cicatrix workflow"));
+
+    let out = run(&["workflow", "invalid"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown subcommand `invalid`"));
+
+    let out = run(&["workflow", "run"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: cicatrix workflow run"));
+
+    let out = run(&["workflow", "run", "triage"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: cicatrix workflow run triage"));
+
+    let out = run(&["workflow", "status"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: cicatrix workflow status"));
+}
+
+#[test]
+fn workflow_run_triage_audit_list_status_cli() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let db_path = temp_dir.path().join("cli_workflows.db");
+    let db_str = db_path.display().to_string();
+
+    // 1. Run triage workflow
+    let out = run(&[
+        "workflow",
+        "run",
+        "triage",
+        "tests::test_cli_workflow",
+        "--repo",
+        "cicatrix",
+        "--candidate",
+        "sha_1",
+        "--candidate",
+        "sha_2",
+        "--failure-log",
+        "assertion failed: (a == b)\n --> src/workflow/triage.rs:15:1",
+        "--db",
+        &db_str,
+    ]);
+    assert!(
+        out.status.success(),
+        "triage failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Workflow execution:"));
+    assert!(stdout.contains("State: COMPLETED"));
+    assert!(stdout.contains("Culprit commit: Some(\"sha_2\")"));
+    assert!(stdout.contains("Candidate BugFact: BUG_TESTS_TEST_CLI_WORKFLOW"));
+
+    // Extract execution ID from output
+    let exec_id_line = stdout
+        .lines()
+        .find(|l| l.starts_with("Workflow execution:"))
+        .expect("exec id line");
+    let exec_id = exec_id_line
+        .strip_prefix("Workflow execution:")
+        .unwrap()
+        .trim();
+
+    // 2. Run audit workflow
+    let out = run(&[
+        "workflow", "run", "audit", "--repo", ".", "--marker", "DRIFT", "--db", &db_str,
+    ]);
+    assert!(
+        out.status.success(),
+        "audit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Workflow execution:"));
+    assert!(stdout.contains("State: COMPLETED"));
+    assert!(stdout.contains("Scanned targets: 1"));
+
+    // 3. List workflow executions
+    let out = run(&["workflow", "list", "--db", &db_str]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("EXEC_ID"));
+    assert!(stdout.contains("triage_workflow"));
+    assert!(stdout.contains("audit_workflow"));
+    assert!(stdout.contains("COMPLETED"));
+    assert!(stdout.contains(exec_id));
+
+    // 4. Status of specific execution
+    let out = run(&["workflow", "status", exec_id, "--db", &db_str]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&format!("Execution ID:  {exec_id}")));
+    assert!(stdout.contains("Workflow:      triage_workflow"));
+    assert!(stdout.contains("State:         COMPLETED"));
+    assert!(stdout.contains("Event Log"));
+}

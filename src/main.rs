@@ -2,6 +2,7 @@
 pub mod autonomy;
 pub mod branch;
 mod bug_md;
+pub mod context;
 mod corpus;
 mod drift;
 pub mod frontier;
@@ -39,6 +40,8 @@ fn main() -> ExitCode {
         "workflow" => cmd_workflow(&args[1..]),
         // Model Context Protocol (MCP) server interface (CER-2758, Phase 2.3)
         "mcp" => cmd_mcp(&args[1..]),
+        // Soma run-context assembly integration (CER-2763, Phase 4.2)
+        "context" => cmd_context(&args[1..]),
         // Wheelhorse reversibility action pipeline (CER-2759, Phase 3.1)
         "reversibility" => cmd_reversibility(&args[1..]),
         // Synthetic canary tripwire registry & intrusion guard (CER-2760, Phase 3.2)
@@ -50,10 +53,11 @@ fn main() -> ExitCode {
         _ => {
             eprintln!(
                 "usage: cicatrix <inject [--target <path>] | record [<BUG_*.md>...] [--branch <id>] | \
-                 query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>] | \
+                 query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>] [--format <human|soma-block|json>] [--limit <N>] | \
                  branch <fork <id> [--from <base>] [--frontier <vec>] | drop <id> | settle <id> | list | path <id>> | \
                  project-meta [--apply] | drift [scan [--repo <path>]] | \
                  workflow <run <triage|audit|review-gate> | signal <id> <verdict> | list | status <id>> | \
+                 context <assemble --prompt <p> <paths...> [--limit <N>] [--as-of <c>] [--frontier <f>] [--branch <b>] [--actor <a>] [--fail-soft <bool>] [--json]> | \
                  reversibility <eval|classify|plan|validate> [--diff <path>] [--tier <shadow|supervised|autonomous>] [--json] | \
                  tripwire <list [--json] | check <target> [--content <text>] [--actor <actor>] [--action <action>] [--json] | touches [--limit <N>] [--canary <id>] [--json] | seed> | \
                  autonomy <status [--actor <actor>] [--capability <capability>] [--json] | promote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | demote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | history [--actor <actor>] [--capability <capability>] [--limit <N>] [--json] | check --actor <actor> --capability <capability> --tier <tier> [--json]> | \
@@ -238,16 +242,20 @@ fn cmd_record(rest: &[String]) -> ExitCode {
     }
 }
 
-/// `query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>]` —
+/// `query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>] [--actor <name>] [--format <human|soma-block|json>] [--limit <N>]` —
 /// ask reverie (or branch database) which known-bug surfaces the changed files touch;
 /// with `--as-of`, keep only bugs fixed at or before `<commit>` (git-ancestry);
-/// with `--frontier`, keep only bugs causally dominated by the given version-vector frontier cut.
+/// with `--frontier`, keep only bugs causally dominated by the given version-vector frontier cut;
+/// with `--format`, format output as human (default), soma-block, or json;
+/// with `--limit`, truncate output facts to at most N entries.
 fn cmd_query(rest: &[String]) -> ExitCode {
     let mut files = Vec::new();
     let mut as_of: Option<String> = None;
     let mut frontier_arg: Option<String> = None;
     let mut branch_arg: Option<String> = None;
     let mut actor_arg: Option<String> = None;
+    let mut format_arg: Option<String> = None;
+    let mut limit_arg: Option<usize> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -279,6 +287,36 @@ fn cmd_query(rest: &[String]) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
+            "--format" => match it.next() {
+                Some(fmt) => match fmt.as_str() {
+                    "human" | "soma-block" | "json" => format_arg = Some(fmt.clone()),
+                    other => {
+                        eprintln!(
+                            "cicatrix query: invalid --format `{other}` (expected human, soma-block, or json)"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                },
+                None => {
+                    eprintln!(
+                        "cicatrix query: --format needs an argument (human, soma-block, json)"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--limit" => match it.next() {
+                Some(lim) => match lim.parse::<usize>() {
+                    Ok(val) => limit_arg = Some(val),
+                    Err(e) => {
+                        eprintln!("cicatrix query: invalid --limit `{lim}`: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                None => {
+                    eprintln!("cicatrix query: --limit needs an integer");
+                    return ExitCode::FAILURE;
+                }
+            },
             flag if flag.starts_with("--") => {
                 eprintln!("cicatrix query: unknown flag {flag}");
                 return ExitCode::FAILURE;
@@ -288,7 +326,7 @@ fn cmd_query(rest: &[String]) -> ExitCode {
     }
     if files.is_empty() {
         eprintln!(
-            "usage: cicatrix query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>] [--actor <name>]"
+            "usage: cicatrix query <changed-file>... [--as-of <commit>] [--frontier <vector>] [--branch <id>] [--actor <name>] [--format <human|soma-block|json>] [--limit <N>]"
         );
         return ExitCode::FAILURE;
     }
@@ -358,13 +396,24 @@ fn cmd_query(rest: &[String]) -> ExitCode {
             eprintln!("cicatrix query: tripwire intrusion detected: {e}");
             return ExitCode::FAILURE;
         }
-        let bridge = reverie::ReverieBridge::from_env();
-        match bridge.touches_known_bug(&files) {
-            Ok(h) => h,
-            Err(e) => {
-                let masked = crate::masking::MaskedError::internal(format!("{e}"));
-                eprintln!("{}", masked.to_cli_string("cicatrix query"));
-                return ExitCode::FAILURE;
+        if store.has_reverie() {
+            let bridge = reverie::ReverieBridge::from_env();
+            match bridge.touches_known_bug(&files) {
+                Ok(h) => h,
+                Err(e) => {
+                    let masked = crate::masking::MaskedError::internal(format!("{e}"));
+                    eprintln!("{}", masked.to_cli_string("cicatrix query"));
+                    return ExitCode::FAILURE;
+                }
+            }
+        } else {
+            match store.touches_known_bug(&files) {
+                Ok(h) => h,
+                Err(e) => {
+                    let masked = crate::masking::MaskedError::internal(format!("{e}"));
+                    eprintln!("{}", masked.to_cli_string("cicatrix query"));
+                    return ExitCode::FAILURE;
+                }
             }
         }
     };
@@ -393,16 +442,227 @@ fn cmd_query(rest: &[String]) -> ExitCode {
         }
     }
 
-    if hits.is_empty() {
-        println!("no known-bug surface touched");
-        return ExitCode::SUCCESS;
+    if let Some(limit) = limit_arg {
+        hits.truncate(limit);
     }
-    for f in &hits {
-        println!("⚠ {}: known-bug surface ({})", f.id, f.meta_pattern);
-        println!("  files: {}", f.files.join(", "));
-        println!("  guard: {} — don't reintroduce it", f.regression_test);
+
+    let format = format_arg.as_deref().unwrap_or("human");
+    match format {
+        "json" => match serde_json::to_string_pretty(&hits) {
+            Ok(s) => {
+                println!("{s}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("cicatrix query: failed to serialize json: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "soma-block" => {
+            let limit = limit_arg.unwrap_or(context::DEFAULT_LIMIT);
+            if let Some(block) = context::render_known_bugs_block(&hits, limit) {
+                println!("{block}");
+            }
+            ExitCode::SUCCESS
+        }
+        "human" => {
+            if hits.is_empty() {
+                println!("no known-bug surface touched");
+                return ExitCode::SUCCESS;
+            }
+            for f in &hits {
+                println!("⚠ {}: known-bug surface ({})", f.id, f.meta_pattern);
+                println!("  files: {}", f.files.join(", "));
+                println!("  guard: {} — don't reintroduce it", f.regression_test);
+            }
+            ExitCode::SUCCESS
+        }
+        _ => unreachable!(),
     }
-    ExitCode::SUCCESS
+}
+
+/// `context assemble --prompt <p> <paths...> [--limit <N>] [--as-of <c>] [--frontier <f>] [--branch <b>] [--actor <a>] [--fail-soft <bool>] [--json]` —
+/// Assemble a task prompt by prepending a <known-bugs> regression block for touched files,
+/// following the Soma run-context assembly specification (CER-2611).
+fn cmd_context(rest: &[String]) -> ExitCode {
+    let sub = match rest.first().map(String::as_str) {
+        Some(s) => s,
+        None => {
+            eprintln!(
+                "usage: cicatrix context assemble --prompt <p> <paths...> [--limit <N>] [--as-of <c>] [--frontier <f>] [--branch <b>] [--actor <a>] [--fail-soft <bool>] [--json]"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match sub {
+        "assemble" => {
+            let mut prompt_opt: Option<String> = None;
+            let mut paths = Vec::new();
+            let mut limit: Option<usize> = None;
+            let mut as_of: Option<String> = None;
+            let mut frontier: Option<String> = None;
+            let mut branch: Option<String> = None;
+            let mut actor: Option<String> = None;
+            let mut fail_soft = true;
+            let mut json_output = false;
+
+            let mut it = rest[1..].iter().peekable();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "--prompt" => match it.next() {
+                        Some(p) => prompt_opt = Some(p.clone()),
+                        None => {
+                            eprintln!("cicatrix context assemble: --prompt requires an argument");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--limit" => match it.next() {
+                        Some(l) => match l.parse::<usize>() {
+                            Ok(val) => limit = Some(val),
+                            Err(e) => {
+                                eprintln!("cicatrix context assemble: invalid --limit `{l}`: {e}");
+                                return ExitCode::FAILURE;
+                            }
+                        },
+                        None => {
+                            eprintln!("cicatrix context assemble: --limit requires an integer");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--as-of" => match it.next() {
+                        Some(c) => as_of = Some(c.clone()),
+                        None => {
+                            eprintln!("cicatrix context assemble: --as-of requires a commit SHA");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--frontier" => match it.next() {
+                        Some(f) => frontier = Some(f.clone()),
+                        None => {
+                            eprintln!("cicatrix context assemble: --frontier requires a vector");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--branch" => match it.next() {
+                        Some(b) => branch = Some(b.clone()),
+                        None => {
+                            eprintln!("cicatrix context assemble: --branch requires an ID");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--actor" => match it.next() {
+                        Some(a) => actor = Some(a.clone()),
+                        None => {
+                            eprintln!("cicatrix context assemble: --actor requires a name");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--fail-soft" => {
+                        if let Some(next) = it.peek() {
+                            if *next == "true" {
+                                fail_soft = true;
+                                it.next();
+                            } else if *next == "false" {
+                                fail_soft = false;
+                                it.next();
+                            } else {
+                                fail_soft = true;
+                            }
+                        } else {
+                            fail_soft = true;
+                        }
+                    }
+                    "--no-fail-soft" => {
+                        fail_soft = false;
+                    }
+                    "--json" => {
+                        json_output = true;
+                    }
+                    "--path" => match it.next() {
+                        Some(p) => paths.push(p.clone()),
+                        None => {
+                            eprintln!("cicatrix context assemble: --path requires a file path");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    flag if flag.starts_with("--") => {
+                        eprintln!("cicatrix context assemble: unknown flag `{flag}`");
+                        return ExitCode::FAILURE;
+                    }
+                    path => {
+                        paths.push(path.to_string());
+                    }
+                }
+            }
+
+            let prompt = match prompt_opt {
+                Some(p) => p,
+                None => {
+                    eprintln!(
+                        "cicatrix context assemble: missing required argument `--prompt <text>`"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+
+            let mut opts = context::AssembleOptions::new(prompt, paths).with_fail_soft(fail_soft);
+            if let Some(l) = limit {
+                opts = opts.with_limit(l);
+            }
+            if let Some(a) = as_of {
+                opts = opts.with_as_of(a);
+            }
+            if let Some(f) = frontier {
+                opts = opts.with_frontier(f);
+            }
+            if let Some(b) = branch {
+                opts = opts.with_branch(b);
+            }
+            if let Some(act) = actor {
+                opts = opts.with_actor(act);
+            }
+
+            match context::assemble_context(&opts) {
+                Ok(res) => {
+                    if json_output {
+                        match serde_json::to_string_pretty(&res) {
+                            Ok(s) => println!("{s}"),
+                            Err(e) => {
+                                eprintln!(
+                                    "cicatrix context assemble: JSON serialization failed: {e}"
+                                );
+                                return ExitCode::FAILURE;
+                            }
+                        }
+                    } else {
+                        println!("{}", res.prompt);
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(context::ContextError::TripwireIntrusion(msg)) => {
+                    eprintln!("cicatrix context assemble: tripwire intrusion detected: {msg}");
+                    ExitCode::FAILURE
+                }
+                Err(context::ContextError::InvalidArgument(msg)) => {
+                    eprintln!("cicatrix context assemble: invalid argument: {msg}");
+                    ExitCode::FAILURE
+                }
+                Err(context::ContextError::Database(msg)) => {
+                    let masked = crate::masking::MaskedError::internal(msg);
+                    eprintln!("{}", masked.to_cli_string("cicatrix context assemble"));
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        other => {
+            eprintln!("cicatrix context: unknown subcommand `{other}`");
+            eprintln!(
+                "usage: cicatrix context assemble --prompt <p> <paths...> [--limit <N>] [--as-of <c>] [--frontier <f>] [--branch <b>] [--actor <a>] [--fail-soft <bool>] [--json]"
+            );
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// `branch <fork <id> [--from <base>] [--frontier <vec>] | drop <id> | settle <id> | list | path <id>>` —

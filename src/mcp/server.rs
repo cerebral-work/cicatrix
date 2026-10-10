@@ -537,6 +537,10 @@ async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
                     handle_rest_tool_call("cicatrix_sync_replication", &body, &mut stream).await?;
                     return Ok(());
                 }
+                ("POST", "/api/v1/diagnose") => {
+                    handle_rest_tool_call("cicatrix_diagnose", &body, &mut stream).await?;
+                    return Ok(());
+                }
                 ("GET", "/api/v1/error/simulate_500") | ("POST", "/api/v1/error/simulate_500") => {
                     let masked = crate::masking::MaskedError::internal(
                         "simulated internal database error at /home/ctodie/db.sqlite with token=secret123"
@@ -720,6 +724,52 @@ mod tests {
         assert!(
             res3_str.contains("evt-http-001"),
             "Expected evt-http-001, got: {res3_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_diagnose_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let _ = handle_http_connection(socket).await;
+                });
+            }
+        });
+
+        let mut client = TcpStream::connect(local_addr).await.unwrap();
+        let payload = json!({
+            "target": "tests::test_rest_diagnose",
+            "failure_log": "thread panicked at assertion failed: left == right\n  --> src/foo.rs:10:5",
+            "candidate_files": ["src/foo.rs"],
+            "forks": 2,
+            "write_file": false
+        });
+        let body = serde_json::to_vec(&payload).unwrap();
+        let req = format!(
+            "POST /api/v1/diagnose HTTP/1.1\r\nHost: {local_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        client.write_all(req.as_bytes()).await.unwrap();
+        client.write_all(&body).await.unwrap();
+
+        let mut res = Vec::new();
+        client.read_to_end(&mut res).await.unwrap();
+        let res_str = String::from_utf8_lossy(&res);
+        assert!(
+            res_str.contains("200 OK"),
+            "Expected 200 OK, got: {res_str}"
+        );
+        assert!(
+            res_str.contains("BUG_TESTS_TEST_REST_DIAGNOSE"),
+            "Expected bug fact id, got: {res_str}"
+        );
+        assert!(
+            res_str.contains("\"winning_hypothesis_id\":\"hyp-1\""),
+            "Expected winning hypothesis, got: {res_str}"
         );
     }
 }

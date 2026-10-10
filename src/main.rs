@@ -5,6 +5,7 @@ mod bug_md;
 pub mod context;
 mod corpus;
 pub mod cortex;
+pub mod diagnose;
 mod drift;
 pub mod frontier;
 mod gitf;
@@ -54,6 +55,8 @@ fn main() -> ExitCode {
         "cortex" => cmd_cortex(&args[1..]),
         // Cluster log-segment shipping replication (CER-2765, Phase 4.4)
         "replication" => cmd_replication(&args[1..]),
+        // Diagnose-style auto-authoring with parallel root-cause forking (CER-1394)
+        "diagnose" => cmd_diagnose(&args[1..]),
         // Streaming HTTP server for cluster runners
         "serve" => cmd_serve(&args[1..]),
         _ => {
@@ -69,6 +72,7 @@ fn main() -> ExitCode {
                  autonomy <status [--actor <actor>] [--capability <capability>] [--json] | promote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | demote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | history [--actor <actor>] [--capability <capability>] [--limit <N>] [--json] | check --actor <actor> --capability <capability> --tier <tier> [--json]> | \
                  cortex <ingest-settle [--file <path>] [--raw <json>] [--observed-dir <path>] [--actor <actor>] [--json] | settle-status [--json] | settle-events [--source <source>] [--negative <bool>] [--job <id>] [--limit <N>] [--json]> | \
                  replication <export --since <tx> [--until <tx>] [--limit <N>] [--out <file>] [--actor <actor>] [--json] | apply (--file <path> | --raw <json>) [--actor <actor>] [--json] | status [--peer <id>] [--json] | sync --peer-url <url> [--peer-id <id>] [--actor <actor>] [--json]> | \
+                 diagnose <target> [--log <file|text>] [--repro <cmd>] [--files <list>] [--forks <N>] [--out-dir <dir>] [--out <file>] [--no-write] [--json] | \
                  mcp [--stdio | --http [<bind>]] [--bind <bind>] | serve [--mcp] [--bind <bind>]>"
             );
             ExitCode::FAILURE
@@ -3869,6 +3873,188 @@ fn cmd_replication(rest: &[String]) -> ExitCode {
         }
         unknown => {
             eprintln!("cicatrix replication: unknown subcommand `{unknown}`");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `diagnose <target> [--log <file|text>] [--repro <cmd>] [--files <list>] [--forks <N>] [--out-dir <dir>] [--out <file>] [--no-write] [--json]`
+///
+/// Investigate test failure or defect, fork N root-cause hypotheses, converge on a winning
+/// diagnosis, and auto-author an observed BugFact markdown document.
+fn cmd_diagnose(rest: &[String]) -> ExitCode {
+    if rest.is_empty() || rest.iter().any(|a| a == "--help" || a == "-h") {
+        eprintln!(
+            "usage: cicatrix diagnose <target> [--log <file|text>] [--repro <cmd>] [--files <list>] [--forks <N>] [--out-dir <dir>] [--out <file>] [--no-write] [--json]"
+        );
+        return if rest.is_empty() {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        };
+    }
+
+    let mut target_name: Option<String> = None;
+    let mut log_arg: Option<String> = None;
+    let mut repro_cmd: Option<String> = None;
+    let mut candidate_files: Vec<String> = Vec::new();
+    let mut forks: usize = 3;
+    let mut out_dir: Option<std::path::PathBuf> = None;
+    let mut out_file: Option<std::path::PathBuf> = None;
+    let mut write_file = true;
+    let mut json_output = false;
+
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--log" => match it.next() {
+                Some(l) => log_arg = Some(l.clone()),
+                None => {
+                    eprintln!("cicatrix diagnose: --log requires an argument (<file|text>)");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--repro" => match it.next() {
+                Some(r) => repro_cmd = Some(r.clone()),
+                None => {
+                    eprintln!("cicatrix diagnose: --repro requires a command string");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--files" => match it.next() {
+                Some(f) => {
+                    for item in f.split(',') {
+                        let trimmed = item.trim();
+                        if !trimmed.is_empty() {
+                            candidate_files.push(trimmed.to_string());
+                        }
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "cicatrix diagnose: --files requires a comma-separated list of paths"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--forks" => match it.next() {
+                Some(n) => match n.parse::<usize>() {
+                    Ok(val) => forks = val,
+                    Err(e) => {
+                        eprintln!("cicatrix diagnose: invalid --forks `{n}`: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                None => {
+                    eprintln!("cicatrix diagnose: --forks requires an integer [1..5]");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--out-dir" => match it.next() {
+                Some(d) => out_dir = Some(std::path::PathBuf::from(d)),
+                None => {
+                    eprintln!("cicatrix diagnose: --out-dir requires a directory path");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--out" => match it.next() {
+                Some(f) => out_file = Some(std::path::PathBuf::from(f)),
+                None => {
+                    eprintln!("cicatrix diagnose: --out requires a file path");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--no-write" => {
+                write_file = false;
+            }
+            "--json" => {
+                json_output = true;
+            }
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix diagnose: unknown flag `{flag}`");
+                return ExitCode::FAILURE;
+            }
+            pos => {
+                if target_name.is_none() {
+                    target_name = Some(pos.to_string());
+                } else {
+                    eprintln!("cicatrix diagnose: unexpected argument `{pos}`");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
+
+    let target_str = match target_name {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => {
+            eprintln!("cicatrix diagnose: missing target name or signature");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let failure_log = match log_arg {
+        Some(val) => {
+            let p = std::path::Path::new(&val);
+            if p.is_file() {
+                match std::fs::read_to_string(p) {
+                    Ok(content) => content,
+                    Err(e) => {
+                        eprintln!("cicatrix diagnose: failed to read log file `{val}`: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                val
+            }
+        }
+        None => String::new(),
+    };
+
+    let target = diagnose::types::DiagnoseTarget {
+        name: target_str,
+        failure_log,
+        repro_command: repro_cmd,
+        candidate_files,
+    };
+
+    let options = diagnose::types::ForkOptions {
+        num_forks: forks,
+        model_tier: None,
+        target_dir: out_dir,
+        output_file: out_file,
+        write_file,
+        mock_hypotheses: None,
+    };
+
+    match diagnose::run_diagnose(target, options) {
+        Ok(report) => {
+            if json_output {
+                match serde_json::to_string_pretty(&report) {
+                    Ok(j) => println!("{j}"),
+                    Err(e) => {
+                        eprintln!("cicatrix diagnose: failed to serialize report to JSON: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                println!(
+                    "Diagnosed target `{}`:\n  Winning hypothesis: `{}`\n  Rationale: {}\n  BugFact ID: {}",
+                    report.target,
+                    report.winning_hypothesis_id,
+                    report.convergence_rationale,
+                    report.bug_fact.id
+                );
+                if let Some(ref path) = report.output_file {
+                    println!("  Observed BugFact written to: {path}");
+                } else {
+                    println!("  (Document not written to disk; --no-write specified)");
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cicatrix diagnose error: {e}");
             ExitCode::FAILURE
         }
     }

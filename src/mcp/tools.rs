@@ -602,6 +602,53 @@ pub fn mcp_tools() -> Vec<McpToolDefinition> {
                 "required": ["peer_url"]
             }),
         },
+        McpToolDefinition {
+            name: "cicatrix_diagnose".to_string(),
+            description: "Fork parallel root-cause hypotheses for a failure and auto-author an observed BugFact markdown document (clean-room port of agent-afk diagnose)".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Failure target name, test signature, or defect slug"
+                    },
+                    "failure_log": {
+                        "type": "string",
+                        "description": "Raw compiler, panic, assertion, or runtime failure log"
+                    },
+                    "repro_command": {
+                        "type": "string",
+                        "description": "Optional turnkey reproduction command (e.g. cargo test -j 2 test_foo)"
+                    },
+                    "candidate_files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of suspected or touched source file paths"
+                    },
+                    "forks": {
+                        "type": "integer",
+                        "description": "Number of parallel hypothesis forks to evaluate [1..=5] (default: 3)"
+                    },
+                    "model_tier": {
+                        "type": "string",
+                        "description": "Optional model tier designation (e.g. capable, default)"
+                    },
+                    "target_dir": {
+                        "type": "string",
+                        "description": "Directory where BUG_<SLUG>.md will be persisted (defaults to docs/bugs/observed/)"
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "Explicit output file path for the generated BugFact"
+                    },
+                    "write_file": {
+                        "type": "boolean",
+                        "description": "Whether to write the generated BugFact markdown to disk (default: false unless output_file is specified)"
+                    }
+                },
+                "required": ["target"]
+            }),
+        },
     ]
 }
 
@@ -721,6 +768,7 @@ pub async fn execute_tool(name: &str, args: &Value) -> Result<Value, ToolExecuti
         "cicatrix_apply_log_segment" => handle_apply_log_segment(args),
         "cicatrix_replication_status" => handle_replication_status(args),
         "cicatrix_sync_replication" => handle_sync_replication(args).await,
+        "cicatrix_diagnose" => handle_diagnose(args),
         other => Err(ToolExecutionError::Client(format!(
             "unknown tool `{other}`"
         ))),
@@ -1786,6 +1834,118 @@ async fn handle_sync_replication(args: &Value) -> Result<Value, ToolExecutionErr
     }
 }
 
+fn handle_diagnose(args: &Value) -> Result<Value, ToolExecutionError> {
+    let target_val = args.get("target").ok_or_else(|| {
+        ToolExecutionError::Client("missing required parameter `target`".to_string())
+    })?;
+    let target_str = target_val.as_str().ok_or_else(|| {
+        ToolExecutionError::Client("parameter `target` must be a string".to_string())
+    })?;
+
+    if target_str.trim().is_empty() {
+        return Err(ToolExecutionError::Client(
+            "parameter `target` cannot be empty".to_string(),
+        ));
+    }
+
+    let failure_log = args
+        .get("failure_log")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let repro_command = args
+        .get("repro_command")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+
+    let candidate_files = match args.get("candidate_files") {
+        Some(val) => {
+            let files: Vec<String> = serde_json::from_value(val.clone()).map_err(|e| {
+                ToolExecutionError::Client(format!(
+                    "parameter `candidate_files` must be array of strings: {e}"
+                ))
+            })?;
+            files
+        }
+        None => Vec::new(),
+    };
+
+    let forks = match args.get("forks") {
+        Some(f) => {
+            let n = f.as_u64().ok_or_else(|| {
+                ToolExecutionError::Client("parameter `forks` must be an integer".to_string())
+            })? as usize;
+            if !(crate::diagnose::MIN_FORK_COUNT..=crate::diagnose::MAX_FORK_COUNT).contains(&n) {
+                return Err(ToolExecutionError::Client(format!(
+                    "forks must be between {} and {}",
+                    crate::diagnose::MIN_FORK_COUNT,
+                    crate::diagnose::MAX_FORK_COUNT
+                )));
+            }
+            n
+        }
+        None => 3,
+    };
+
+    let target_dir = args
+        .get("target_dir")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from);
+
+    let output_file = args
+        .get("output_file")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from);
+
+    let write_file = args
+        .get("write_file")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| output_file.is_some());
+
+    let model_tier = args
+        .get("model_tier")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+
+    let target = crate::diagnose::DiagnoseTarget {
+        name: target_str.to_string(),
+        failure_log,
+        repro_command,
+        candidate_files,
+    };
+
+    let options = crate::diagnose::ForkOptions {
+        num_forks: forks,
+        model_tier,
+        target_dir,
+        output_file,
+        write_file,
+        mock_hypotheses: None,
+    };
+
+    match crate::diagnose::run_diagnose(target, options) {
+        Ok(report) => {
+            serde_json::to_value(&report).map_err(|e| ToolExecutionError::Internal(e.to_string()))
+        }
+        Err(crate::diagnose::DiagnoseError::NeverZeroValue { field, detail }) => {
+            Err(ToolExecutionError::Client(format!(
+                ":db/neverZeroValue violation on `{field}`: {detail}"
+            )))
+        }
+        Err(crate::diagnose::DiagnoseError::EmptyTarget) => Err(ToolExecutionError::Client(
+            "target cannot be empty".to_string(),
+        )),
+        Err(crate::diagnose::DiagnoseError::InvalidForks(msg)) => Err(ToolExecutionError::Client(
+            format!("invalid fork count: {msg}"),
+        )),
+        Err(crate::diagnose::DiagnoseError::SchemaValidation(msg)) => Err(
+            ToolExecutionError::Client(format!("schema validation failed: {msg}")),
+        ),
+        Err(e) => Err(ToolExecutionError::Internal(e.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1793,7 +1953,7 @@ mod tests {
     #[test]
     fn test_mcp_tools_list_completeness() {
         let tools = mcp_tools();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 21);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"cicatrix_ingest_cortex_settle"));
         assert!(names.contains(&"cicatrix_list_cortex_settles"));
@@ -1802,6 +1962,7 @@ mod tests {
         assert!(names.contains(&"cicatrix_apply_log_segment"));
         assert!(names.contains(&"cicatrix_replication_status"));
         assert!(names.contains(&"cicatrix_sync_replication"));
+        assert!(names.contains(&"cicatrix_diagnose"));
         assert!(names.contains(&"cicatrix_query_known_bugs"));
         assert!(names.contains(&"cicatrix_verify_diff"));
         assert!(names.contains(&"cicatrix_record_defect"));
@@ -2193,6 +2354,50 @@ diff --git a/src/secrets.rs b/src/secrets.rs
                 assert!(msg.contains("tripwire intrusion detected"));
             }
             ToolExecutionError::Internal(e) => panic!("expected Client error, got Internal({e})"),
+        }
+    }
+
+    #[test]
+    fn test_cicatrix_diagnose_mcp_tool() {
+        // 1. Successful diagnosis with no write
+        let args = json!({
+            "target": "tests::test_mcp_diagnose",
+            "failure_log": "thread 'test' panicked at src/store.rs:42:5: assertion failed\nerror[E0308]: mismatched types",
+            "candidate_files": ["src/store.rs"],
+            "forks": 3,
+            "write_file": false
+        });
+        let res = handle_diagnose(&args).expect("handle_diagnose succeeds");
+        assert_eq!(res["target"], "tests::test_mcp_diagnose");
+        assert_eq!(res["winning_hypothesis_id"], "hyp-1");
+        assert_eq!(res["bug_fact"]["id"], "BUG_TESTS_TEST_MCP_DIAGNOSE");
+        assert_eq!(res["hypotheses"].as_array().unwrap().len(), 3);
+        assert!(res["rendered_markdown"]
+            .as_str()
+            .unwrap()
+            .contains("Observed tier — ungrounded"));
+
+        // 2. Reject empty target
+        let empty_args = json!({
+            "target": "   ",
+            "write_file": false
+        });
+        let err = handle_diagnose(&empty_args).expect_err("empty target rejected");
+        match err {
+            ToolExecutionError::Client(msg) => assert!(msg.contains("cannot be empty")),
+            _ => panic!("expected client error"),
+        }
+
+        // 3. Reject invalid forks (> 5)
+        let invalid_forks = json!({
+            "target": "test_target",
+            "forks": 6,
+            "write_file": false
+        });
+        let err2 = handle_diagnose(&invalid_forks).expect_err("invalid forks rejected");
+        match err2 {
+            ToolExecutionError::Client(msg) => assert!(msg.contains("forks must be between")),
+            _ => panic!("expected client error"),
         }
     }
 }

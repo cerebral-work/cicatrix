@@ -8,6 +8,7 @@ mod gitf;
 pub mod hooks;
 pub mod mcp;
 mod reverie;
+pub mod reversibility;
 pub mod store;
 pub mod workflow;
 
@@ -35,6 +36,8 @@ fn main() -> ExitCode {
         "workflow" => cmd_workflow(&args[1..]),
         // Model Context Protocol (MCP) server interface (CER-2758, Phase 2.3)
         "mcp" => cmd_mcp(&args[1..]),
+        // Wheelhorse reversibility action pipeline (CER-2759, Phase 3.1)
+        "reversibility" => cmd_reversibility(&args[1..]),
         // Streaming HTTP server for cluster runners
         "serve" => cmd_serve(&args[1..]),
         _ => {
@@ -44,6 +47,7 @@ fn main() -> ExitCode {
                  branch <fork <id> [--from <base>] [--frontier <vec>] | drop <id> | settle <id> | list | path <id>> | \
                  project-meta [--apply] | drift [scan [--repo <path>]] | \
                  workflow <run <triage|audit|review-gate> | signal <id> <verdict> | list | status <id>> | \
+                 reversibility <eval|classify|plan|validate> [--diff <path>] [--tier <shadow|supervised|autonomous>] [--json] | \
                  mcp [--stdio | --http [<bind>]] [--bind <bind>] | serve [--mcp] [--bind <bind>]>"
             );
             ExitCode::FAILURE
@@ -1672,6 +1676,255 @@ fn cmd_serve(rest: &[String]) -> ExitCode {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// `reversibility <eval|classify|plan|validate> [--diff <path>] [--tier <shadow|supervised|autonomous>] [--json]`
+fn cmd_reversibility(rest: &[String]) -> ExitCode {
+    use reversibility::{
+        AutonomyTier, ReversibilityPipeline, ReversibilityVerdict, ValidationResult,
+    };
+    use std::io::{IsTerminal, Read};
+
+    if rest.is_empty() || rest.iter().any(|a| a == "--help" || a == "-h") {
+        eprintln!(
+            "usage: cicatrix reversibility <eval|classify|plan|validate> \
+             [--diff <path|->] [--tier <shadow|supervised|autonomous>] [--json]"
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let subcmd = &rest[0];
+    if subcmd != "eval"
+        && subcmd != "evaluate"
+        && subcmd != "classify"
+        && subcmd != "plan"
+        && subcmd != "validate"
+    {
+        eprintln!(
+            "cicatrix reversibility: unknown subcommand `{subcmd}`; expected eval, classify, plan, or validate"
+        );
+        return ExitCode::FAILURE;
+    }
+    let mut diff_source: Option<String> = None;
+    let mut tier = AutonomyTier::Supervised;
+    let mut json_output = false;
+
+    let mut it = rest[1..].iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--diff" => match it.next() {
+                Some(d) => diff_source = Some(d.clone()),
+                None => {
+                    eprintln!("cicatrix reversibility: --diff requires a path or '-' for stdin");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--tier" => match it.next() {
+                Some(t) => match t.parse::<AutonomyTier>() {
+                    Ok(parsed) => tier = parsed,
+                    Err(e) => {
+                        eprintln!("cicatrix reversibility: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                },
+                None => {
+                    eprintln!(
+                        "cicatrix reversibility: --tier requires shadow, supervised, or autonomous"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--json" => {
+                json_output = true;
+            }
+            flag if flag.starts_with("--") => {
+                eprintln!("cicatrix reversibility: unknown flag {flag}");
+                return ExitCode::FAILURE;
+            }
+            pos if diff_source.is_none() => {
+                diff_source = Some(pos.to_string());
+            }
+            other => {
+                eprintln!("cicatrix reversibility: unexpected argument `{other}`");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let diff_content = match diff_source.as_deref() {
+        Some("-") => {
+            let mut buf = String::new();
+            if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                eprintln!("cicatrix reversibility: failed to read stdin: {e}");
+                return ExitCode::FAILURE;
+            }
+            buf
+        }
+        Some(path_or_str) => {
+            if Path::new(path_or_str).exists() {
+                match std::fs::read_to_string(path_or_str) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!(
+                            "cicatrix reversibility: failed to read file `{path_or_str}`: {e}"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else if path_or_str.contains("diff --git") || path_or_str.contains("--- ") {
+                path_or_str.to_string()
+            } else {
+                match std::fs::read_to_string(path_or_str) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("cicatrix reversibility: failed to read `{path_or_str}`: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+        }
+        None => {
+            if !std::io::stdin().is_terminal() {
+                let mut buf = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                    eprintln!("cicatrix reversibility: failed to read stdin: {e}");
+                    return ExitCode::FAILURE;
+                }
+                buf
+            } else {
+                eprintln!("cicatrix reversibility: missing diff input (provide via --diff <path|-> or piped stdin)");
+                return ExitCode::FAILURE;
+            }
+        }
+    };
+
+    if diff_content.trim().is_empty() {
+        eprintln!("cicatrix reversibility: diff content is empty");
+        return ExitCode::FAILURE;
+    }
+
+    let pipeline = ReversibilityPipeline::new(tier);
+
+    match subcmd.as_str() {
+        "classify" => match pipeline.classify(&diff_content) {
+            Ok(report) => {
+                if json_output {
+                    match serde_json::to_string_pretty(&report) {
+                        Ok(j) => println!("{j}"),
+                        Err(e) => {
+                            eprintln!("cicatrix reversibility: failed to format json: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                } else {
+                    println!("Action Class: {:?}", report.action_class);
+                    println!("Canary Touched: {}", report.canary_touched);
+                    println!("Touched Files:");
+                    for f in &report.touched_files {
+                        println!("  - {f}");
+                    }
+                    println!("Reasons:");
+                    for r in &report.reasons {
+                        println!("  - {r}");
+                    }
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("cicatrix reversibility classify failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "plan" => match pipeline.plan(&diff_content) {
+            Ok(plan) => {
+                if json_output {
+                    match serde_json::to_string_pretty(&plan) {
+                        Ok(j) => println!("{j}"),
+                        Err(e) => {
+                            eprintln!("cicatrix reversibility: failed to format json: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                } else {
+                    println!("Compensation Plan ({} ops):", plan.total_ops);
+                    for (idx, op) in plan.ops.iter().enumerate() {
+                        println!("  {}. {:?}", idx + 1, op);
+                    }
+                    println!("\nRollback Script:\n{}", plan.rollback_script);
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("cicatrix reversibility plan failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "validate" => match pipeline.validate(&diff_content) {
+            Ok(val) => {
+                let is_err = matches!(val, ValidationResult::Invalid { .. });
+                if json_output {
+                    match serde_json::to_string_pretty(&val) {
+                        Ok(j) => println!("{j}"),
+                        Err(e) => {
+                            eprintln!("cicatrix reversibility: failed to format json: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                } else {
+                    println!("Validation Outcome: {:?}", val);
+                }
+                if is_err {
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(e) => {
+                eprintln!("cicatrix reversibility validate failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "eval" | "evaluate" => match pipeline.evaluate(&diff_content) {
+            Ok(report) => {
+                let is_block = matches!(report.verdict, ReversibilityVerdict::Block { .. });
+                if json_output {
+                    match serde_json::to_string_pretty(&report) {
+                        Ok(j) => println!("{j}"),
+                        Err(e) => {
+                            eprintln!("cicatrix reversibility: failed to format json: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                } else {
+                    println!("Reversibility Evaluation (Tier: {})", report.tier);
+                    println!("Verdict: {:?}", report.verdict);
+                    println!("Action Class: {:?}", report.action_class);
+                    println!("Validation: {:?}", report.validation);
+                    println!("Canary Touched: {}", report.canary_touched);
+                    println!("Touched Files:");
+                    for f in &report.touched_files {
+                        println!("  - {f}");
+                    }
+                    println!("Summary: {}", report.summary);
+                }
+                if is_block {
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(e) => {
+                eprintln!("cicatrix reversibility eval failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        other => {
+            eprintln!(
+                "cicatrix reversibility: unknown subcommand `{other}`; expected eval, classify, plan, or validate"
+            );
+            ExitCode::FAILURE
+        }
     }
 }
 

@@ -1364,3 +1364,250 @@ fn mcp_usage_errors() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("unknown flag --invalid"));
 }
+
+fn run_with_stdin(args: &[&str], input: &str) -> Output {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(BIN)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn cicatrix binary");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+    }
+
+    child.wait_with_output().expect("failed to wait on child")
+}
+
+#[test]
+fn reversibility_usage_errors() {
+    let out = run(&["reversibility"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("usage: cicatrix reversibility"));
+
+    let out = run(&["reversibility", "unknown"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown subcommand `unknown`"));
+
+    let out = run(&["reversibility", "eval", "--diff"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--diff requires a path or '-' for stdin"));
+
+    let out = run(&["reversibility", "eval", "--diff", "nonexistent.patch"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("failed to read `nonexistent.patch`"));
+
+    let out = run(&["reversibility", "eval", "--tier"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--tier requires"));
+
+    let out = run(&["reversibility", "eval", "--tier", "godmode"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("invalid autonomy tier"));
+}
+
+#[test]
+fn reversibility_classify_cli() {
+    let additive_diff = r#"
+diff --git a/tests/test_foo.rs b/tests/test_foo.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tests/test_foo.rs
+@@ -0,0 +1,3 @@
++#[test]
++fn test_additive() {}
++"#;
+    let out = run_with_stdin(
+        &["reversibility", "classify", "--diff", "-", "--json"],
+        additive_diff,
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"type\": \"reversible_additive\""));
+    assert!(stdout.contains("tests/test_foo.rs"));
+
+    let plain_out = run_with_stdin(&["reversibility", "classify", "--diff", "-"], additive_diff);
+    assert!(plain_out.status.success());
+    let plain_stdout = String::from_utf8_lossy(&plain_out.stdout);
+    assert!(plain_stdout.contains("Action Class: ReversibleAdditive"));
+
+    let migration_diff = r#"
+diff --git a/migrations/0002_drop_legacy_tables.sql b/migrations/0002_drop_legacy_tables.sql
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/migrations/0002_drop_legacy_tables.sql
+@@ -0,0 +1,2 @@
++DROP TABLE legacy_users;
++DROP TABLE legacy_tokens;
++"#;
+    let out = run_with_stdin(
+        &["reversibility", "classify", "--diff", "-", "--json"],
+        migration_diff,
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"type\": \"one_way_door\""));
+    assert!(stdout.contains("migration file path touched"));
+}
+
+#[test]
+fn reversibility_plan_cli() {
+    let edit_diff = r#"
+diff --git a/src/lib.rs b/src/lib.rs
+index 1111111..2222222 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,4 @@
+ pub fn answer() -> u32 {
+-    41
++    42
++    // comment
+ }
+"#;
+    let out = run_with_stdin(
+        &["reversibility", "plan", "--diff", "-", "--json"],
+        edit_diff,
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"total_ops\": 1"));
+    assert!(stdout.contains("rollback_script"));
+    assert!(stdout.contains("patch -p1"));
+
+    let plain_out = run_with_stdin(&["reversibility", "plan", "--diff", "-"], edit_diff);
+    assert!(plain_out.status.success());
+    let plain_stdout = String::from_utf8_lossy(&plain_out.stdout);
+    assert!(plain_stdout.contains("Compensation Plan (1 ops)"));
+}
+
+#[test]
+fn reversibility_validate_cli() {
+    let additive_diff = r#"
+diff --git a/tests/test_valid.rs b/tests/test_valid.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tests/test_valid.rs
+@@ -0,0 +1,3 @@
++#[test]
++fn test_valid() {}
++"#;
+    let out = run_with_stdin(
+        &["reversibility", "validate", "--diff", "-", "--json"],
+        additive_diff,
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"status\": \"valid\""));
+    assert!(stdout.contains("\"baseline_restored\": true"));
+}
+
+#[test]
+fn reversibility_eval_tiers_cli() {
+    let additive_diff = r#"
+diff --git a/tests/test_auto.rs b/tests/test_auto.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/tests/test_auto.rs
+@@ -0,0 +1,3 @@
++#[test]
++fn test_auto() {}
++"#;
+    // Autonomous tier: pure additive -> auto_commit
+    let out = run_with_stdin(
+        &[
+            "reversibility",
+            "eval",
+            "--diff",
+            "-",
+            "--tier",
+            "autonomous",
+            "--json",
+        ],
+        additive_diff,
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"verdict\": \"auto_commit\""));
+
+    // Supervised tier: pure additive -> auto_commit_with_notice
+    let out = run_with_stdin(
+        &[
+            "reversibility",
+            "eval",
+            "--diff",
+            "-",
+            "--tier",
+            "supervised",
+            "--json",
+        ],
+        additive_diff,
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"verdict\": \"auto_commit_with_notice\""));
+
+    let edit_diff = r#"
+diff --git a/src/lib.rs b/src/lib.rs
+index 1111111..2222222 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,3 @@
+-const V: usize = 1;
++const V: usize = 2;
+"#;
+    let out = run_with_stdin(
+        &[
+            "reversibility",
+            "eval",
+            "--diff",
+            "-",
+            "--tier",
+            "autonomous",
+            "--json",
+        ],
+        edit_diff,
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"verdict\": \"auto_commit_with_notice\""));
+
+    let migration_diff = r#"
+diff --git a/migrations/0003_drop_stuff.sql b/migrations/0003_drop_stuff.sql
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/migrations/0003_drop_stuff.sql
+@@ -0,0 +1,1 @@
++DROP TABLE accounts;
++"#;
+    let out = run_with_stdin(
+        &[
+            "reversibility",
+            "eval",
+            "--diff",
+            "-",
+            "--tier",
+            "autonomous",
+            "--json",
+        ],
+        migration_diff,
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"verdict\": \"route_to_approval\""));
+}

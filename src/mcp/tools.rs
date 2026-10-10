@@ -1023,7 +1023,7 @@ new file mode 100644
             ToolExecutionError::Client(msg) => {
                 assert!(msg.contains(":db/neverZeroValue violation"));
             }
-            ToolExecutionError::Internal(_) => panic!("expected client error"),
+            ToolExecutionError::Internal(e) => panic!("expected client error, got Internal({e})"),
         }
     }
 
@@ -1067,7 +1067,9 @@ diff --git a/tests/new_test.rs b/tests/new_test.rs
                 assert!(msg.contains("tripwire intrusion detected"));
                 assert!(msg.contains("TRIPWIRE_CANARY_SENTINEL_ALPHA"));
             }
-            ToolExecutionError::Internal(_) => panic!("expected client error on intrusion"),
+            ToolExecutionError::Internal(e) => {
+                panic!("expected client error on intrusion, got Internal({e})")
+            }
         }
     }
 
@@ -1082,7 +1084,9 @@ diff --git a/tests/new_test.rs b/tests/new_test.rs
             ToolExecutionError::Client(msg) => {
                 assert!(msg.contains("tripwire intrusion detected"));
             }
-            ToolExecutionError::Internal(_) => panic!("expected client error on intrusion"),
+            ToolExecutionError::Internal(e) => {
+                panic!("expected client error on intrusion, got Internal({e})")
+            }
         }
     }
 
@@ -1104,7 +1108,9 @@ diff --git a/src/secrets.rs b/src/secrets.rs
             ToolExecutionError::Client(msg) => {
                 assert!(msg.contains("tripwire intrusion detected"));
             }
-            ToolExecutionError::Internal(_) => panic!("expected client error on intrusion"),
+            ToolExecutionError::Internal(e) => {
+                panic!("expected client error on intrusion, got Internal({e})")
+            }
         }
     }
 }

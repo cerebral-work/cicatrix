@@ -237,9 +237,15 @@ flowchart LR
   * Enforced deduplication and idempotency on `(job_id, settle_action)` or `event_id` in SQLite table `cortex_settle_events` (`migrations/0004_cortex_settle_events.sql`) with triggers forbidding `UPDATE` and `DELETE` mutations and `:db/neverZeroValue` check constraints.
   * Enforced fail-closed synthetic canary tripwire guard checks on affected files, proposal summaries, and source identifiers.
   * Exposed CLI commands `cicatrix cortex <ingest-settle|settle-status|settle-events>`, MCP tools (`cicatrix_ingest_cortex_settle`, `cicatrix_list_cortex_settles`, `cicatrix_cortex_settle_status`), and REST HTTP endpoints (`POST /api/v1/cortex/settle`, `GET /api/v1/cortex/settles`, `GET /api/v1/cortex/settle/status`) with Wheelhorse unified error masking.
-* [ ] **Milestone 4.4: Log-Segment Shipping Replication**
-  * Implement `(SinceTx, UntilTx]` windowed log shipping.
-  * Synchronize regression database state between local workstations (`ceres`) and cluster nodes (`cygnus`) across the Tailscale mesh.
+* [x] **Milestone 4.4: Log-Segment Shipping Replication (`CER-2765`)**
+  * Implemented windowed `(since_tx, until_tx]` log-segment shipping replication engine in `src/replication/` (`engine.rs`, `store.rs`, `types.rs`, `error.rs`) with SHA-256 integrity checksum verification (`compute_records_checksum`).
+  * Backed replication log and peer tracking with SQLite migration `migrations/0005_replication_log.sql` defining `replication_log` and `replication_peers` tables with immutable triggers preventing `UPDATE` and `DELETE` mutations and `:db/neverZeroValue` check constraints.
+  * Enforced fail-closed synthetic canary tripwire checks (`guard_check`) on export and apply phases.
+  * Guaranteed idempotent deduplication and zero recursive replication echo loops (incoming applied records do not generate local replication log entries).
+  * Synchronized regression database state between local workstations (`ceres`) and cluster nodes (`cygnus`) across the Tailscale mesh.
+  * Added CLI subcommands `cicatrix replication <export|apply|status|sync>` with `--json` support.
+  * Exposed MCP tools (`cicatrix_export_log_segment`, `cicatrix_apply_log_segment`, `cicatrix_replication_status`, `cicatrix_sync_replication`).
+  * Connected REST HTTP endpoints (`GET /api/v1/replication/segment`, `POST /api/v1/replication/segment`, `GET /api/v1/replication/status`, `POST /api/v1/replication/status`, `POST /api/v1/replication/sync`) with Wheelhorse unified correlation error masking (`ref_` IDs).
 
 ---
 

@@ -496,6 +496,112 @@ pub fn mcp_tools() -> Vec<McpToolDefinition> {
                 }
             }),
         },
+        McpToolDefinition {
+            name: "cicatrix_export_log_segment".to_string(),
+            description: "Export windowed replication log segment (since_tx, until_tx] with SHA-256 integrity checksum.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "since_tx": {
+                        "type": "integer",
+                        "description": "Lower transaction ID watermark bound (exclusive)"
+                    },
+                    "since": {
+                        "type": "integer",
+                        "description": "Alias for since_tx"
+                    },
+                    "until_tx": {
+                        "type": "integer",
+                        "description": "Upper transaction ID watermark bound (inclusive)"
+                    },
+                    "until": {
+                        "type": "integer",
+                        "description": "Alias for until_tx"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of records to export (default 1000)"
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Actor identity performing export for tripwire canary validation"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Snapshot branch identifier to query an isolated branch database"
+                    }
+                }
+            }),
+        },
+        McpToolDefinition {
+            name: "cicatrix_apply_log_segment".to_string(),
+            description: "Apply an incoming replication log segment into the local regression database idempotently.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "segment": {
+                        "type": "object",
+                        "description": "The replication log segment payload object"
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Actor identity performing ingestion for tripwire canary validation"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Snapshot branch identifier to query an isolated branch database"
+                    }
+                },
+                "required": ["segment"]
+            }),
+        },
+        McpToolDefinition {
+            name: "cicatrix_replication_status".to_string(),
+            description: "Retrieve local replication state, local head transaction watermark, and registered peer status.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "peer_id": {
+                        "type": "string",
+                        "description": "Optional peer node identifier to filter results"
+                    },
+                    "peer": {
+                        "type": "string",
+                        "description": "Alias for peer_id"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Snapshot branch identifier to query an isolated branch database"
+                    }
+                }
+            }),
+        },
+        McpToolDefinition {
+            name: "cicatrix_sync_replication".to_string(),
+            description: "Trigger bidirectional replication synchronization with a remote peer node across Tailscale mesh.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "peer_url": {
+                        "type": "string",
+                        "description": "Base URL of the remote peer node (e.g. http://cygnus:8080)"
+                    },
+                    "peer_id": {
+                        "type": "string",
+                        "description": "Optional expected peer identifier"
+                    },
+                    "actor": {
+                        "type": "string",
+                        "description": "Actor identity performing sync"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Snapshot branch identifier to query an isolated branch database"
+                    }
+                },
+                "required": ["peer_url"]
+            }),
+        },
     ]
 }
 
@@ -611,6 +717,10 @@ pub async fn execute_tool(name: &str, args: &Value) -> Result<Value, ToolExecuti
         "cicatrix_ingest_cortex_settle" => handle_ingest_cortex_settle(args),
         "cicatrix_list_cortex_settles" => handle_list_cortex_settles(args),
         "cicatrix_cortex_settle_status" => handle_cortex_settle_status(args),
+        "cicatrix_export_log_segment" => handle_export_log_segment(args),
+        "cicatrix_apply_log_segment" => handle_apply_log_segment(args),
+        "cicatrix_replication_status" => handle_replication_status(args),
+        "cicatrix_sync_replication" => handle_sync_replication(args).await,
         other => Err(ToolExecutionError::Client(format!(
             "unknown tool `{other}`"
         ))),
@@ -1554,6 +1664,128 @@ fn handle_cortex_settle_status(args: &Value) -> Result<Value, ToolExecutionError
     }
 }
 
+fn handle_export_log_segment(args: &Value) -> Result<Value, ToolExecutionError> {
+    let since_tx = args
+        .get("since_tx")
+        .or_else(|| args.get("since"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let until_tx = args
+        .get("until_tx")
+        .or_else(|| args.get("until"))
+        .and_then(Value::as_u64);
+    let limit = args.get("limit").and_then(Value::as_u64).or(Some(1000));
+    let actor = args.get("actor").and_then(Value::as_str);
+    let branch = args.get("branch").and_then(Value::as_str);
+    let db_path = args.get("db_path").and_then(Value::as_str);
+
+    let store = open_store_target_with_path(branch, db_path)?;
+    match crate::replication::export_segment(store.conn(), since_tx, until_tx, limit, actor) {
+        Ok(segment) => {
+            serde_json::to_value(&segment).map_err(|e| ToolExecutionError::Internal(e.to_string()))
+        }
+        Err(crate::replication::ReplicationError::Tripwire(e)) => Err(ToolExecutionError::Client(
+            format!("tripwire intrusion detected: {e}"),
+        )),
+        Err(crate::replication::ReplicationError::InvalidWindow { from_tx, to_tx }) => {
+            Err(ToolExecutionError::Client(format!(
+                "invalid replication window: since_tx ({from_tx}) cannot exceed until_tx ({to_tx})"
+            )))
+        }
+        Err(crate::replication::ReplicationError::Validation(msg)) => {
+            Err(ToolExecutionError::Client(msg))
+        }
+        Err(e) => Err(ToolExecutionError::Internal(e.to_string())),
+    }
+}
+
+fn handle_apply_log_segment(args: &Value) -> Result<Value, ToolExecutionError> {
+    let segment_val = args.get("segment").ok_or_else(|| {
+        ToolExecutionError::Client("missing required parameter `segment`".to_string())
+    })?;
+    let segment: crate::replication::LogSegment = serde_json::from_value(segment_val.clone())
+        .map_err(|e| ToolExecutionError::Client(format!("invalid segment JSON: {e}")))?;
+
+    let actor = args.get("actor").and_then(Value::as_str);
+    let branch = args.get("branch").and_then(Value::as_str);
+    let db_path = args.get("db_path").and_then(Value::as_str);
+
+    let store = open_store_target_with_path(branch, db_path)?;
+    match crate::replication::apply_segment(store.conn(), &segment, actor) {
+        Ok(result) => {
+            serde_json::to_value(&result).map_err(|e| ToolExecutionError::Internal(e.to_string()))
+        }
+        Err(crate::replication::ReplicationError::ChecksumMismatch { expected, actual }) => {
+            Err(ToolExecutionError::Client(format!(
+                "checksum mismatch: expected `{expected}`, calculated `{actual}`"
+            )))
+        }
+        Err(crate::replication::ReplicationError::Tripwire(e)) => Err(ToolExecutionError::Client(
+            format!("tripwire intrusion detected: {e}"),
+        )),
+        Err(crate::replication::ReplicationError::Validation(msg)) => {
+            Err(ToolExecutionError::Client(msg))
+        }
+        Err(e) => Err(ToolExecutionError::Internal(e.to_string())),
+    }
+}
+
+fn handle_replication_status(args: &Value) -> Result<Value, ToolExecutionError> {
+    let peer_id = args
+        .get("peer_id")
+        .or_else(|| args.get("peer"))
+        .and_then(Value::as_str);
+    let branch = args.get("branch").and_then(Value::as_str);
+    let db_path = args.get("db_path").and_then(Value::as_str);
+
+    let store = open_store_target_with_path(branch, db_path)?;
+    match crate::replication::store::get_replication_status(store.conn(), peer_id) {
+        Ok(status) => {
+            serde_json::to_value(&status).map_err(|e| ToolExecutionError::Internal(e.to_string()))
+        }
+        Err(e) => Err(ToolExecutionError::Internal(e.to_string())),
+    }
+}
+
+async fn handle_sync_replication(args: &Value) -> Result<Value, ToolExecutionError> {
+    let peer_url = args
+        .get("peer_url")
+        .or_else(|| args.get("url"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ToolExecutionError::Client("missing required parameter `peer_url`".to_string())
+        })?;
+    let peer_id = args
+        .get("peer_id")
+        .or_else(|| args.get("peer"))
+        .and_then(Value::as_str);
+    let actor = args.get("actor").and_then(Value::as_str);
+    let branch = args.get("branch").and_then(Value::as_str);
+    let db_path = args.get("db_path").and_then(Value::as_str);
+
+    let store = open_store_target_with_path(branch, db_path)?;
+    match crate::replication::sync_peer(store.conn(), peer_url, peer_id, actor) {
+        Ok(result) => {
+            serde_json::to_value(&result).map_err(|e| ToolExecutionError::Internal(e.to_string()))
+        }
+        Err(crate::replication::ReplicationError::Network(msg)) => Err(ToolExecutionError::Client(
+            format!("replication network error: {msg}"),
+        )),
+        Err(crate::replication::ReplicationError::Tripwire(e)) => Err(ToolExecutionError::Client(
+            format!("tripwire intrusion detected: {e}"),
+        )),
+        Err(crate::replication::ReplicationError::ChecksumMismatch { expected, actual }) => {
+            Err(ToolExecutionError::Client(format!(
+                "checksum mismatch: expected `{expected}`, calculated `{actual}`"
+            )))
+        }
+        Err(crate::replication::ReplicationError::Validation(msg)) => {
+            Err(ToolExecutionError::Client(msg))
+        }
+        Err(e) => Err(ToolExecutionError::Internal(e.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1561,11 +1793,15 @@ mod tests {
     #[test]
     fn test_mcp_tools_list_completeness() {
         let tools = mcp_tools();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 20);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"cicatrix_ingest_cortex_settle"));
         assert!(names.contains(&"cicatrix_list_cortex_settles"));
         assert!(names.contains(&"cicatrix_cortex_settle_status"));
+        assert!(names.contains(&"cicatrix_export_log_segment"));
+        assert!(names.contains(&"cicatrix_apply_log_segment"));
+        assert!(names.contains(&"cicatrix_replication_status"));
+        assert!(names.contains(&"cicatrix_sync_replication"));
         assert!(names.contains(&"cicatrix_query_known_bugs"));
         assert!(names.contains(&"cicatrix_verify_diff"));
         assert!(names.contains(&"cicatrix_record_defect"));
@@ -1803,6 +2039,9 @@ diff --git a/src/secrets.rs b/src/secrets.rs
 
     #[test]
     fn test_handle_assemble_run_context_tool() {
+        let _lock = crate::store::sqlite::TEST_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("mcp_test.db");
         let mut store = crate::store::SqliteStore::open(&db_path).unwrap();

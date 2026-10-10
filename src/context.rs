@@ -423,6 +423,9 @@ mod tests {
 
     #[test]
     fn test_assemble_context_with_hits_and_truncation() {
+        let _lock = crate::store::sqlite::TEST_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let mut store = SqliteStore::open(&db_path).unwrap();
@@ -471,6 +474,9 @@ mod tests {
 
     #[test]
     fn test_assemble_context_no_hits_leaves_prompt_unmodified() {
+        let _lock = crate::store::sqlite::TEST_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let store = SqliteStore::open(&db_path).unwrap();
@@ -493,6 +499,9 @@ mod tests {
 
     #[test]
     fn test_assemble_context_fail_soft_on_db_error() {
+        let _lock = crate::store::sqlite::TEST_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let invalid_db_path = "/dev/null/forbidden/db.sqlite";
         std::env::set_var("CICATRIX_DB_PATH", invalid_db_path);
 
@@ -519,6 +528,9 @@ mod tests {
 
     #[test]
     fn test_assemble_context_canary_tripwire_fail_closed() {
+        let _lock = crate::store::sqlite::TEST_ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let store = SqliteStore::open(&db_path).unwrap();

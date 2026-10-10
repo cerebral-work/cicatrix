@@ -306,7 +306,7 @@ fn parse_query_string(query: &str) -> Value {
                 continue;
             }
         }
-        if k == "limit" {
+        if k == "limit" || k == "since_tx" || k == "since" || k == "until_tx" || k == "until" {
             if let Ok(num) = v.parse::<u64>() {
                 map.insert(k, json!(num));
                 continue;
@@ -504,6 +504,37 @@ async fn handle_http_connection(mut stream: TcpStream) -> io::Result<()> {
                 ("POST", "/api/v1/cortex/settle/status") => {
                     handle_rest_tool_call("cicatrix_cortex_settle_status", &body, &mut stream)
                         .await?;
+                    return Ok(());
+                }
+                ("GET", "/api/v1/replication/segment") => {
+                    handle_rest_tool_call_value(
+                        "cicatrix_export_log_segment",
+                        parse_query_string(query),
+                        &mut stream,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                ("POST", "/api/v1/replication/segment") => {
+                    handle_rest_tool_call("cicatrix_apply_log_segment", &body, &mut stream).await?;
+                    return Ok(());
+                }
+                ("GET", "/api/v1/replication/status") => {
+                    handle_rest_tool_call_value(
+                        "cicatrix_replication_status",
+                        parse_query_string(query),
+                        &mut stream,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                ("POST", "/api/v1/replication/status") => {
+                    handle_rest_tool_call("cicatrix_replication_status", &body, &mut stream)
+                        .await?;
+                    return Ok(());
+                }
+                ("POST", "/api/v1/replication/sync") => {
+                    handle_rest_tool_call("cicatrix_sync_replication", &body, &mut stream).await?;
                     return Ok(());
                 }
                 ("GET", "/api/v1/error/simulate_500") | ("POST", "/api/v1/error/simulate_500") => {

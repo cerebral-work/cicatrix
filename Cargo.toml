@@ -30,6 +30,7 @@ autumn-harvest-sqlite = "0.7.0"
 rusqlite = { version = "0.40", features = ["bundled"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net", "io-util"] }
 tempfile = "3"
+sha2 = "0.11"
 
 [dev-dependencies]
 

@@ -38,20 +38,61 @@ pub fn check(root: &Path) -> Result<(), String> {
 
 /// Compare the pinned channel, the `rustc --version` line and the MSRV, if any (XT-5).
 pub fn verify(channel: &str, rustc_line: &str, rust_version: Option<&str>) -> Result<(), String> {
-    let _ = (channel, rustc_line, rust_version);
-    Err(String::new())
+    let actual = rustc_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| format!("cannot parse rustc output {rustc_line:?}"))?;
+    if actual != channel {
+        return Err(format!(
+            "rustc is {actual} but rust-toolchain.toml pins {channel}"
+        ));
+    }
+    if let Some(rust_version) = rust_version {
+        if parse_version(rust_version)? > parse_version(channel)? {
+            return Err(format!(
+                "rust-version {rust_version} is above the pinned channel {channel}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Parse `1.85` or `1.94.1` into a comparable triple. A missing patch is 0.
 pub fn parse_version(text: &str) -> Result<(u64, u64, u64), String> {
-    let _ = text;
-    Err(String::new())
+    let bad = || format!("bad version {text:?}");
+    let mut parts = text.split('.').map(|p| p.parse::<u64>().map_err(|_| bad()));
+    let major = parts.next().ok_or_else(bad)??;
+    let minor = parts.next().ok_or_else(bad)??;
+    let patch = parts.next().transpose()?.unwrap_or(0);
+    if parts.next().is_some() {
+        return Err(bad());
+    }
+    Ok((major, minor, patch))
 }
 
 /// Read `key = "value"` from the given `[section]` (or the whole file if `None`).
 /// A minimal line scanner: enough for `rust-toolchain.toml` and `Cargo.toml`.
 pub fn toml_string(text: &str, section: Option<&str>, key: &str) -> Option<String> {
-    let _ = (text, section, key);
+    let mut current: Option<String> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            current = Some(name.trim().to_string());
+            continue;
+        }
+        if section.is_some() && current.as_deref() != section {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == key {
+                let v = v.split('#').next().unwrap_or("").trim();
+                return v
+                    .strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .map(str::to_string);
+            }
+        }
+    }
     None
 }
 

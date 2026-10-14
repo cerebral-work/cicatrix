@@ -1,0 +1,6 @@
+# The Rust the estate's ci-rust runner image bakes (spec 0003, XT-10).
+# Before this file, CI built with whatever `stable` was that day.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

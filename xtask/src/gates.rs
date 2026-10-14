@@ -256,13 +256,21 @@ pub fn install_build_line(jobs: &str) -> Vec<String> {
 
 /// The `cargo metadata` call that lists the workspace targets (XT-11).
 pub fn metadata_line() -> Vec<String> {
-    Vec::new()
+    let locked: &[&str] = if LOCKED { &["--locked"] } else { &[] };
+    [
+        &["cargo", "metadata", "--no-deps", "--format-version", "1"][..],
+        locked,
+    ]
+    .concat()
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
 }
 
 /// True when a `cargo metadata` document names a target cargo doc-tests (XT-11).
 pub fn has_doctest_target(metadata: &str) -> bool {
-    let _ = metadata;
-    true
+    let compact: String = metadata.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains("\"doctest\":true")
 }
 
 /// How one step of `ci` ended.
@@ -392,6 +400,17 @@ impl Ctx {
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
+
+    /// Whether any workspace target is one cargo doc-tests (XT-11). When `cargo metadata`
+    /// itself fails, say yes, so `cargo test --doc` runs and reports the problem.
+    fn has_doctests(&self) -> bool {
+        match self.command(&metadata_line()).output() {
+            Ok(out) if out.status.success() => {
+                has_doctest_target(&String::from_utf8_lossy(&out.stdout))
+            }
+            _ => true,
+        }
+    }
 }
 
 /// Install each pinned tool that is missing or at another version (XT-3, XT-4).
@@ -436,6 +455,10 @@ fn step(ctx: &Ctx, gate: Gate) -> Result<(), String> {
     match gate {
         Gate::Tools => tools(ctx),
         Gate::ToolchainCheck => crate::toolchain::check(&ctx.root),
+        Gate::DocTest if !ctx.has_doctests() => {
+            println!("doc-test: nothing to test, no workspace target has doc tests (XT-11)");
+            Ok(())
+        }
         Gate::Ci | Gate::Install => Err(format!("{} is not a single step", gate.name())),
         _ => {
             let nextest = gate == Gate::Test && ctx.probe(&NEXTEST).is_some();

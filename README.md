@@ -71,4 +71,16 @@ tests/cli.rs                   CLI behavior suite (every verb + the drift-path i
 .cicatrix/baseline-green       session-local marker (gitignored) the commit-gate requires
 ```
 
+## Build
+
+```bash
+cargo xtask ci        # tools, toolchain-check, fmt-check, clippy, test, doc-test, deny, typos, machete
+cargo xtask install   # ci, then release builds of every binary
+```
+
+`cargo xtask ci` needs only cargo and rustup. rustup installs the Rust that
+`rust-toolchain.toml` pins (1.94.1), and `cargo xtask tools` (the first step of `ci`) installs
+cargo-deny, typos, cargo-machete and cargo-nextest at pinned versions into `.tools/`. The steps
+are in [spec 0003](specs/0003-cargo-xtask-gates.md).
+
 Remote: `cerebral-work/cicatrix` (private).

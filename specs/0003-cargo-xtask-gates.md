@@ -30,6 +30,7 @@ This specification pins Rust 1.99.0, the stable its CI built with on its last gr
 * **XT-8 (Event-driven):** When `install` runs, the xtask shall run `ci`, then `cargo build --release --locked --workspace --exclude xtask --bins -j N`.
 * **XT-9 (Event-driven):** When CI runs for a push or a pull request, the job `xtask-ci` shall run `cargo xtask ci` on `ubuntu-latest`, the runner of the existing Rust jobs.
 * **XT-10 (Ubiquitous):** The repository root shall carry a `rust-toolchain.toml` that pins Rust 1.99.0 with the `rustfmt` and `clippy` components.
+* **XT-11 (State-driven):** While no workspace target is one cargo doc-tests (`cargo metadata --no-deps` reports no `"doctest": true` target; cicatrix and xtask are binaries only), `doc-test` shall print that it has nothing to test and pass, instead of running `cargo test --doc`, which fails with "no library targets found".
 
 ### Non-functional constraints
 

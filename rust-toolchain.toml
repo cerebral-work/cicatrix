@@ -1,6 +1,7 @@
-# The Rust the estate's ci-rust runner image bakes (spec 0003, XT-10).
+# The stable Rust CI built main with on its last green run (38065706318, 2026-10-10), so the
+# existing jobs keep the compiler and clippy they pass with (spec 0003, XT-10).
 # Before this file, CI built with whatever `stable` was that day.
 [toolchain]
-channel = "1.94.1"
+channel = "1.99.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

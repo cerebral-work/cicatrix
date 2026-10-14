@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn xt10_the_repository_pins_rust_1_94_1_with_rustfmt_and_clippy() {
+    fn xt10_the_repository_pins_rust_1_99_0_with_rustfmt_and_clippy() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .map(Path::to_path_buf)
@@ -192,7 +192,7 @@ mod tests {
         let toolchain = fs::read_to_string(root.join("rust-toolchain.toml")).unwrap_or_default();
         assert_eq!(
             toml_string(&toolchain, Some("toolchain"), "channel").as_deref(),
-            Some("1.94.1")
+            Some("1.99.0")
         );
         let components = toolchain
             .lines()

@@ -113,3 +113,23 @@ jobs:
           name: cicatrix
           path: target/release/cicatrix
           retention-days: 14
+
+  xtask-ci:
+    name: cargo xtask ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      # rustup installs the rust-toolchain.toml pin (rustfmt and clippy included).
+      - name: toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: xtask-ci
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+          # The pinned tools `cargo xtask tools` builds into .tools/.
+          cache-directories: .tools
+      - name: cargo xtask ci
+        run: cargo xtask ci

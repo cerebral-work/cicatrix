@@ -9,3 +9,5 @@ refs/
 .blackwall/
 .dagr/
 .zed/
+# pinned gate tools that `cargo xtask tools` installs (spec 0003, XT-3)
+/.tools/

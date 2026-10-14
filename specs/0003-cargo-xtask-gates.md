@@ -16,7 +16,7 @@ Operator decision, Christian, 2026-10-13: `cargo xtask` is the one build entrypo
 This specification adds the gates that `cargo xtask ci` and `cargo xtask install` run.
 They sit beside `spec-check`, `.cicatrix/establish-baseline.sh` and the existing CI jobs. Nothing is removed.
 The repository had no `rust-toolchain.toml`, and its CI builds with whatever `stable` is that day.
-This specification pins Rust 1.94.1, the version the estate's `ci-rust` runner image bakes.
+This specification pins Rust 1.99.0, the stable its CI built with on its last green run of `main` (run 38065706318, 2026-10-10).
 
 ### Functional requirements
 
@@ -29,7 +29,7 @@ This specification pins Rust 1.94.1, the version the estate's `ci-rust` runner i
 * **XT-7 (Event-driven):** When `ci` runs, the xtask shall run `tools`, `toolchain-check`, `fmt-check`, `clippy`, `test`, `doc-test`, `deny`, `typos` and `machete` in that order, stop at the first step that fails, print one summary line per step, and exit non-zero if a step failed.
 * **XT-8 (Event-driven):** When `install` runs, the xtask shall run `ci`, then `cargo build --release --locked --workspace --exclude xtask --bins -j N`.
 * **XT-9 (Event-driven):** When CI runs for a push or a pull request, the job `xtask-ci` shall run `cargo xtask ci` on `ubuntu-latest`, the runner of the existing Rust jobs.
-* **XT-10 (Ubiquitous):** The repository root shall carry a `rust-toolchain.toml` that pins Rust 1.94.1 with the `rustfmt` and `clippy` components.
+* **XT-10 (Ubiquitous):** The repository root shall carry a `rust-toolchain.toml` that pins Rust 1.99.0 with the `rustfmt` and `clippy` components.
 
 ### Non-functional constraints
 
@@ -77,5 +77,5 @@ cargo xtask ci
 
 ## Notes
 
-The pin changes the Rust that the existing CI jobs build with: `dtolnay/rust-toolchain@stable` installs stable, then rustup follows `rust-toolchain.toml` in the repository.
-The workspace checks clean on 1.94.1 (`cargo +1.94.1 check --workspace --all-targets`, 2026-10-14).
+The pin fixes the Rust that the existing CI jobs build with: `dtolnay/rust-toolchain@stable` installs stable, then rustup follows `rust-toolchain.toml` in the repository. Today that is the same 1.99.0; when stable moves, the pin holds.
+The estate default for a repository without a pin is 1.94.1, the `ci-rust` image's Rust. It was the first pin here, and it was replaced: clippy 1.94.1 fails `clippy::overly_complex_bool_expr` (deny by default) on `src/cortex/event.rs` (`is_negative_verdict`), which clippy 1.99.0 does not report, so the existing `fmt + clippy` job would have gone red. Whether that expression is meant as written is a question for its owner, not part of this spec.

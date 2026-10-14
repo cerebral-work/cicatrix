@@ -254,6 +254,17 @@ pub fn install_build_line(jobs: &str) -> Vec<String> {
     .collect()
 }
 
+/// The `cargo metadata` call that lists the workspace targets (XT-11).
+pub fn metadata_line() -> Vec<String> {
+    Vec::new()
+}
+
+/// True when a `cargo metadata` document names a target cargo doc-tests (XT-11).
+pub fn has_doctest_target(metadata: &str) -> bool {
+    let _ = metadata;
+    true
+}
+
 /// How one step of `ci` ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -804,6 +815,31 @@ mod tests {
         for line in [&passed, &failed, &not_run, &two_lines].map(|r| summary_line("xtask ci", r)) {
             assert_eq!(line.lines().count(), 1, "{line:?}");
         }
+    }
+
+    #[test]
+    fn xt11_doc_test_needs_a_target_with_doc_tests() {
+        let bins_only = r#"{"packages":[{"name":"cicatrix","targets":[{"kind":["bin"],"name":"cicatrix","doctest":false,"test":true}]},{"name":"xtask","targets":[{"kind":["bin"],"name":"xtask","doctest":false}]}]}"#;
+        assert!(!has_doctest_target(bins_only));
+        let with_lib = r#"{"packages":[{"name":"kd","targets":[{"kind":["lib"],"doctest":true},{"kind":["bin"],"doctest":false}]}]}"#;
+        assert!(has_doctest_target(with_lib));
+        assert!(has_doctest_target("{\"doctest\": true}"));
+        assert!(!has_doctest_target(""));
+    }
+
+    #[test]
+    fn xt11_metadata_lists_the_workspace_targets() {
+        assert_eq!(
+            metadata_line(),
+            strings(&[
+                "cargo",
+                "metadata",
+                "--no-deps",
+                "--format-version",
+                "1",
+                "--locked"
+            ])
+        );
     }
 
     #[test]

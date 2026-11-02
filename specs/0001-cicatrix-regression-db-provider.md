@@ -35,12 +35,14 @@ The provider integrates temporal datalog frontiers, deterministic durable workfl
 
 ## Design
 
-### Cleanroom Architecture & Lineage
+### Upstream Vendoring & Lineage (`janus-datalog-rs` Supersedes `cicatrix`)
 
-The system combines three research lineages in cleanroom implementations:
-1. `wbrown/janus-datalog`: Version-vector frontiers (`{ReplicaID -> maxLamport}`), snapshot database forking, `:db/neverZeroValue` schema integrity constraints, and longitudinal stochastic occurrence logs.
-2. `autumn-foundation/autumn-harvest`: Deterministic event-sourced workflow replay, durable signals with deduplication keys, child workflow DAG scheduling, dual-tier SQLite WAL and PostgreSQL storage, and native `#[workflow(mcp)]` exposure.
-3. `wheelhorsedev/nexus`: Reversibility-gated autonomy pipelines (`classify` -> `plan` -> `validate` -> `decide`), synthetic canary tripwires, correlation-masked errors (`ref_` identifiers), and the three-tier earned autonomy trust ladder (`shadow`, `supervised`, `autonomous`).
+> **2026-11-01 Operator Ruling:** Rather than maintaining `cicatrix` or rolling a cleanroom Datalog implementation, we vendor `github.com/wbrown/janus-datalog` (`Apache-2.0`, authored by Wes Brown / `@wbrown`, pinned at commit `69bfc3b256328f20341e7d57649faaa44a366f96`) and maintain idiomatic Rust bindings (`janus-datalog-rs` / `janus-datalog-sys`).
+
+The architecture integrates three upstream lineages with full attribution and provenance:
+1. `github.com/wbrown/janus-datalog` (`Apache-2.0`, `@wbrown`, pinned at `69bfc3b256328f20341e7d57649faaa44a366f96`): Vendored upstream Go engine exposed to Rust via `janus-datalog-rs` (`c-archive` FFI), providing recursive rules on a relational-algebra core (semi-naive fixpoint iteration, magic sets, stratified negation), 8 covering indices (including `ATEV` and `TAEV` `History().Since(P)` delta views), CRDT storage (`LWW`, `Add-Wins Set`, `RGA`), `AsOf(elementID)` / `History()` time-travel, and `:db/neverZeroValue` schema integrity constraints.
+2. `github.com/autumn-foundation/autumn-harvest` (`MIT OR Apache-2.0`, pinned at `0bad2773659a31c35611b2ed484963e55e88fffa`): Deterministic event-sourced workflow replay, durable signals with deduplication keys, child workflow DAG scheduling, dual-tier SQLite WAL and PostgreSQL storage, and native `#[workflow(mcp)]` exposure.
+3. `github.com/wheelhorsedev/nexus`: Reversibility-gated autonomy pipelines (`classify` -> `plan` -> `validate` -> `decide`), synthetic canary tripwires, correlation-masked errors (`ref_` identifiers), and the three-tier earned autonomy trust ladder (`shadow`, `supervised`, `autonomous`).
 
 ### Subsystem Boundaries
 

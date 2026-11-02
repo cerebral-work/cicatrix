@@ -25,8 +25,13 @@ structured bug-fix docs distilled into meta-patterns, plus fail-closed LLM revie
 into **reverie**'s consolidation substrate.
 
 cicatrix is *consolidation applied to defects* — it is not a new memory store. Per the
-**2026-06-18 decision, "reverie is the store,"** the janus-datalog datalog sidecar was dropped;
-the markdown corpus is the source of truth and each fact is projected one-way into reverie.
+**2026-11-01 operator decision ("maintain Rust bindings to `wbrown/janus-datalog` instead of maintaining `cicatrix`")**,
+`cicatrix` is superseded by **`janus-datalog-rs`** — Rust bindings over vendored upstream
+`github.com/wbrown/janus-datalog` (`Apache-2.0`, Wes Brown / `@wbrown`, pinned at commit
+`69bfc3b256328f20341e7d57649faaa44a366f96`), using Janus Datalog's native **Recursive Rules on a
+Relational-Algebra Core** (semi-naive fixpoint evaluation, magic-set rewrites, stratified negation,
+and `History().Since(P)` TAEV delta views) rather than rolling a custom Datalog or maintaining a
+separate `cicatrix` codebase.
 
 ## 1. The arms (the constructs)
 

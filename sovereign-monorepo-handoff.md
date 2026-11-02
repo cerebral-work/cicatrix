@@ -1,15 +1,15 @@
 # Sovereign Monorepo Consolidation Handoff Notice — Cicatrix
 
 > [!IMPORTANT]
-> **Notice of Repository Absorption into `cerebral-work/vespertin`**
-> Under **LeanSpec 0017** (`specs/0017-estate-deconvolution-and-vespertin-consolidation.md`) and operator ruling (2026-10-27), `cerebral-work/cicatrix` is scheduled for consolidation into the unified sovereign monorepo:
-> **[`cerebral-work/vespertin`](https://github.com/cerebral-work/vespertin)**
+> **Notice of Deprecation & Supersession by `janus-datalog-rs` (`wbrown/janus-datalog` Rust Bindings)**
+> Per operator ruling (2026-11-01), rather than maintaining `cicatrix` or rolling a cleanroom Datalog implementation, `cerebral-work/cicatrix` is superseded by **`janus-datalog-rs`** — idiomatic Rust bindings (`c-archive` FFI) over vendored upstream **[`github.com/wbrown/janus-datalog`](https://github.com/wbrown/janus-datalog)** (`Apache-2.0`, authored by Wes Brown / `@wbrown`, pinned at `69bfc3b256328f20341e7d57649faaa44a366f96`) inside **[`cerebral-work/vespertin`](https://github.com/cerebral-work/vespertin)**.
 
 ## 1. Subsystem Destination
 
 | Source Surface | Target Subsystem in `vespertin` | Subsystem Purpose |
 |---|---|---|
-| `cerebral-work/cicatrix` | `vespertin/reverie/cicatrix/` | Grounded Bug Store, defect lifecycle tracker (`cicatrix-core`), and CLI interface (`cicatrix-cli`). |
+| `github.com/wbrown/janus-datalog` | `vespertin/vendor/janus-datalog-rs/` | Rust FFI bindings (`c-archive` / `bindgen`) over upstream `wbrown/janus-datalog` (`Apache-2.0`, `@wbrown`): recursive rules on a relational-algebra core (semi-naive fixpoint, magic sets, stratified negation), 8 covering indices (`ATEV`, `TAEV` `History().Since(P)`), CRDT storage, `AsOf()`/`History()`, and `:db/neverZeroValue`. |
+| `cerebral-work/cicatrix` (`docs/bugs/grounded/`) | `vespertin/reverie/` | Grounded bug-fact corpus projected into Reverie + queried via `janus-datalog-rs` (`cicatrix` Rust crate retired). |
 
 ## 2. Consolidation Rules & Guidelines
 

@@ -88,6 +88,7 @@ All notable changes to cicatrix are recorded here. Format follows
 - `CHANGELOG.md` — this file.
 
 ### Changed
+- Migrate Rust CI build caching in `.github/workflows/ci.yml` from `Swatinem/rust-cache` to `kunobi-ninja/kache-action`.
 - `README.md` — added a lineage block and a ground-truth pointer row (CANON / CLAUDE / SESSIONS /
   docs/sessions).
 - Adopted the `cerebral-work/terrarium` federated-node standard: lineage blocks on the root context

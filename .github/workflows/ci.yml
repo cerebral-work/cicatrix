@@ -12,8 +12,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Incremental compilation is useless in CI and bloats the rust-cache.
-  CARGO_INCREMENTAL: 0
+  # Incremental compilation is disabled in CI for kache.
+  CARGO_INCREMENTAL: "0"
 
 # Cancel in-progress runs on the same ref — only the latest push matters.
 concurrency:
@@ -29,12 +29,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust build cache (kache)
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v2.0.0
         with:
-          shared-key: ci-lint
-          # Only main writes the cache; PRs restore-only (no churn / eviction).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
+          version: "2.0.0"
+          cache-executables: "false"
+          github-cache: "true"
+          manifest-key: ci-lint
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy
@@ -46,11 +48,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust build cache (kache)
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v2.0.0
         with:
-          shared-key: ci-test
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
+          version: "2.0.0"
+          cache-executables: "false"
+          github-cache: "true"
+          manifest-key: ci-test
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       # Run cicatrix's OWN gate: it runs the suite and writes .cicatrix/baseline-green
       # only on green (exit 1 on red). "Green by construction" enforced server-side,
       # not just on the operator's laptop.
@@ -100,11 +105,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust build cache (kache)
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v2.0.0
         with:
-          shared-key: ci-release
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-on-failure: true
+          version: "2.0.0"
+          cache-executables: "false"
+          github-cache: "true"
+          manifest-key: ci-release
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - name: build --release
         run: cargo build --release --bin cicatrix
       - name: upload binary

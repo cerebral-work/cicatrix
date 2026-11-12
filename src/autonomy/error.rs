@@ -19,6 +19,12 @@ pub enum AutonomyError {
     Validation(String),
     /// Violation of append-only ledger immutability.
     AppendOnlyViolation(String),
+    /// Promotion requires cryptographic human signer proof (CER-3527).
+    UnverifiedPromotion(String),
+    /// Signer principal is automated, a bot, or otherwise non-human (CER-3527).
+    NonHumanSigner(String),
+    /// Cryptographic SSH signature creation or verification failed (CER-3527).
+    SignatureVerification(String),
 }
 
 impl fmt::Display for AutonomyError {
@@ -37,6 +43,15 @@ impl fmt::Display for AutonomyError {
             Self::Validation(msg) => write!(f, "validation error: {msg}"),
             Self::AppendOnlyViolation(msg) => {
                 write!(f, "append-only audit ledger violation: {msg}")
+            }
+            Self::UnverifiedPromotion(msg) => {
+                write!(f, "unverified promotion refused: {msg}")
+            }
+            Self::NonHumanSigner(msg) => {
+                write!(f, "non-human signer rejected: {msg}")
+            }
+            Self::SignatureVerification(msg) => {
+                write!(f, "signature verification failed: {msg}")
             }
         }
     }

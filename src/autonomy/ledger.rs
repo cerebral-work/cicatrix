@@ -82,6 +82,18 @@ pub struct AutonomyEvent {
     pub evidence_json: Option<String>,
     /// Authority authorizing the transition (operator, harness, automated).
     pub authorized_by: String,
+    /// Cryptographically verified human principal from `allowed_signers` (CER-3527).
+    #[serde(default)]
+    pub verified_signer: Option<String>,
+    /// SSH public key fingerprint (e.g. `SHA256:...`) verified against `allowed_signers` (CER-3527).
+    #[serde(default)]
+    pub signer_fingerprint: Option<String>,
+    /// Armored OpenSSH `SSHSIG` detached signature over the canonical promotion payload (CER-3527).
+    #[serde(default)]
+    pub signature: Option<String>,
+    /// True when both `verified_signer` and `signature` are recorded on this event (CER-3527).
+    #[serde(default)]
+    pub verified: bool,
     /// ISO 8601 UTC creation timestamp.
     pub created_at: String,
 }
@@ -99,6 +111,15 @@ pub struct AutonomyState {
     pub tier: AutonomyTier,
     /// Identifier of the latest audit event that set this tier.
     pub last_event_id: String,
+    /// True when the active tier was established by a cryptographically verified human promotion (CER-3527).
+    #[serde(default)]
+    pub verified_promotion: bool,
+    /// Authenticated human principal that signed the active promotion, if verified (CER-3527).
+    #[serde(default)]
+    pub verified_signer: Option<String>,
+    /// SSH key fingerprint that signed the active promotion, if verified (CER-3527).
+    #[serde(default)]
+    pub signer_fingerprint: Option<String>,
     /// Timestamp of the last state update.
     pub updated_at: String,
 }
@@ -130,11 +151,41 @@ pub fn record_event(conn: &Connection, event: &AutonomyEvent) -> Result<(), Auto
                 .to_string(),
         ));
     }
+    if let Some(ref vs) = event.verified_signer {
+        if vs.trim().is_empty() {
+            return Err(AutonomyError::Validation(
+                ":db/neverZeroValue constraint violation: verified_signer cannot be empty or whitespace"
+                    .to_string(),
+            ));
+        }
+    }
+    if let Some(ref fp) = event.signer_fingerprint {
+        if fp.trim().is_empty() {
+            return Err(AutonomyError::Validation(
+                ":db/neverZeroValue constraint violation: signer_fingerprint cannot be empty or whitespace"
+                    .to_string(),
+            ));
+        }
+    }
+    if let Some(ref sig) = event.signature {
+        if sig.trim().is_empty() {
+            return Err(AutonomyError::Validation(
+                ":db/neverZeroValue constraint violation: signature cannot be empty or whitespace"
+                    .to_string(),
+            ));
+        }
+    }
+    if event.verified_signer.is_some() != event.signature.is_some() {
+        return Err(AutonomyError::Validation(
+            "verified_signer and signature must both be present or both be None".to_string(),
+        ));
+    }
 
     conn.execute(
         "INSERT INTO autonomy_ledger (
-            id, actor, capability, from_tier, to_tier, action_type, reason, evidence_json, authorized_by, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            id, actor, capability, from_tier, to_tier, action_type, reason, evidence_json,
+            authorized_by, verified_signer, signer_fingerprint, signature, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             event.id,
             event.actor,
@@ -145,6 +196,9 @@ pub fn record_event(conn: &Connection, event: &AutonomyEvent) -> Result<(), Auto
             event.reason,
             event.evidence_json,
             event.authorized_by,
+            event.verified_signer,
+            event.signer_fingerprint,
+            event.signature,
             event.created_at,
         ],
     )?;
@@ -174,6 +228,44 @@ pub fn get_tier(
     }
 }
 
+fn state_from_row(row: &rusqlite::Row<'_>) -> Result<AutonomyState, AutonomyError> {
+    let actor: String = row.get(0)?;
+    let capability: String = row.get(1)?;
+    let tier_str: String = row.get(2)?;
+    let last_event_id: String = row.get(3)?;
+    let updated_at: String = row.get(4)?;
+    let action_type: Option<String> = row.get(5)?;
+    let raw_signer: Option<String> = row.get(6)?;
+    let raw_fp: Option<String> = row.get(7)?;
+    let raw_sig: Option<String> = row.get(8)?;
+
+    let current_tier = tier_str
+        .parse::<AutonomyTier>()
+        .map_err(AutonomyError::Database)?;
+
+    let verified_promotion = action_type.as_deref() == Some("promote")
+        && raw_signer.as_ref().is_some_and(|s| !s.trim().is_empty())
+        && raw_sig.as_ref().is_some_and(|s| !s.trim().is_empty());
+
+    let (verified_signer, signer_fingerprint) = if verified_promotion {
+        (raw_signer, raw_fp)
+    } else {
+        (None, None)
+    };
+
+    Ok(AutonomyState {
+        actor,
+        capability,
+        current_tier,
+        tier: current_tier,
+        last_event_id,
+        verified_promotion,
+        verified_signer,
+        signer_fingerprint,
+        updated_at,
+    })
+}
+
 /// Retrieve the complete `AutonomyState` for a given actor and capability.
 pub fn get_state(
     conn: &Connection,
@@ -181,29 +273,16 @@ pub fn get_state(
     capability: &str,
 ) -> Result<Option<AutonomyState>, AutonomyError> {
     let mut stmt = conn.prepare(
-        "SELECT actor, capability, current_tier, last_event_id, updated_at
-         FROM autonomy_state WHERE actor = ?1 AND capability = ?2",
+        "SELECT s.actor, s.capability, s.current_tier, s.last_event_id, s.updated_at,
+                l.action_type, l.verified_signer, l.signer_fingerprint, l.signature
+         FROM autonomy_state s
+         LEFT JOIN autonomy_ledger l ON s.last_event_id = l.id
+         WHERE s.actor = ?1 AND s.capability = ?2",
     )?;
 
     let mut rows = stmt.query(params![actor, capability])?;
     if let Some(row) = rows.next()? {
-        let actor: String = row.get(0)?;
-        let capability: String = row.get(1)?;
-        let tier_str: String = row.get(2)?;
-        let last_event_id: String = row.get(3)?;
-        let updated_at: String = row.get(4)?;
-        let current_tier = tier_str
-            .parse::<AutonomyTier>()
-            .map_err(AutonomyError::Database)?;
-
-        Ok(Some(AutonomyState {
-            actor,
-            capability,
-            current_tier,
-            tier: current_tier,
-            last_event_id,
-            updated_at,
-        }))
+        Ok(Some(state_from_row(row)?))
     } else {
         Ok(None)
     }
@@ -218,47 +297,27 @@ pub fn list_states(
 
     if let Some(act) = actor {
         let mut stmt = conn.prepare(
-            "SELECT actor, capability, current_tier, last_event_id, updated_at
-             FROM autonomy_state WHERE actor = ?1 ORDER BY capability ASC",
+            "SELECT s.actor, s.capability, s.current_tier, s.last_event_id, s.updated_at,
+                    l.action_type, l.verified_signer, l.signer_fingerprint, l.signature
+             FROM autonomy_state s
+             LEFT JOIN autonomy_ledger l ON s.last_event_id = l.id
+             WHERE s.actor = ?1 ORDER BY s.capability ASC",
         )?;
         let mut rows = stmt.query(params![act])?;
         while let Some(row) = rows.next()? {
-            let a: String = row.get(0)?;
-            let c: String = row.get(1)?;
-            let t: String = row.get(2)?;
-            let l: String = row.get(3)?;
-            let u: String = row.get(4)?;
-            let current_tier = t.parse::<AutonomyTier>().map_err(AutonomyError::Database)?;
-            results.push(AutonomyState {
-                actor: a,
-                capability: c,
-                current_tier,
-                tier: current_tier,
-                last_event_id: l,
-                updated_at: u,
-            });
+            results.push(state_from_row(row)?);
         }
     } else {
         let mut stmt = conn.prepare(
-            "SELECT actor, capability, current_tier, last_event_id, updated_at
-             FROM autonomy_state ORDER BY actor ASC, capability ASC",
+            "SELECT s.actor, s.capability, s.current_tier, s.last_event_id, s.updated_at,
+                    l.action_type, l.verified_signer, l.signer_fingerprint, l.signature
+             FROM autonomy_state s
+             LEFT JOIN autonomy_ledger l ON s.last_event_id = l.id
+             ORDER BY s.actor ASC, s.capability ASC",
         )?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
-            let a: String = row.get(0)?;
-            let c: String = row.get(1)?;
-            let t: String = row.get(2)?;
-            let l: String = row.get(3)?;
-            let u: String = row.get(4)?;
-            let current_tier = t.parse::<AutonomyTier>().map_err(AutonomyError::Database)?;
-            results.push(AutonomyState {
-                actor: a,
-                capability: c,
-                current_tier,
-                tier: current_tier,
-                last_event_id: l,
-                updated_at: u,
-            });
+            results.push(state_from_row(row)?);
         }
     }
 
@@ -277,19 +336,23 @@ pub fn list_events(
 
     let query = match (actor, capability) {
         (Some(_), Some(_)) => {
-            "SELECT id, actor, capability, from_tier, to_tier, action_type, reason, evidence_json, authorized_by, created_at
+            "SELECT id, actor, capability, from_tier, to_tier, action_type, reason, evidence_json,
+                    authorized_by, verified_signer, signer_fingerprint, signature, created_at
              FROM autonomy_ledger WHERE actor = ?1 AND capability = ?2 ORDER BY created_at DESC, id DESC LIMIT ?3"
         }
         (Some(_), None) => {
-            "SELECT id, actor, capability, from_tier, to_tier, action_type, reason, evidence_json, authorized_by, created_at
+            "SELECT id, actor, capability, from_tier, to_tier, action_type, reason, evidence_json,
+                    authorized_by, verified_signer, signer_fingerprint, signature, created_at
              FROM autonomy_ledger WHERE actor = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2"
         }
         (None, Some(_)) => {
-            "SELECT id, actor, capability, from_tier, to_tier, action_type, reason, evidence_json, authorized_by, created_at
+            "SELECT id, actor, capability, from_tier, to_tier, action_type, reason, evidence_json,
+                    authorized_by, verified_signer, signer_fingerprint, signature, created_at
              FROM autonomy_ledger WHERE capability = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2"
         }
         (None, None) => {
-            "SELECT id, actor, capability, from_tier, to_tier, action_type, reason, evidence_json, authorized_by, created_at
+            "SELECT id, actor, capability, from_tier, to_tier, action_type, reason, evidence_json,
+                    authorized_by, verified_signer, signer_fingerprint, signature, created_at
              FROM autonomy_ledger ORDER BY created_at DESC, id DESC LIMIT ?1"
         }
     };
@@ -312,7 +375,14 @@ pub fn list_events(
         let reason: String = row.get(6)?;
         let ev: Option<String> = row.get(7)?;
         let auth: String = row.get(8)?;
-        let ts: String = row.get(9)?;
+        let verified_signer: Option<String> = row.get(9)?;
+        let signer_fingerprint: Option<String> = row.get(10)?;
+        let signature: Option<String> = row.get(11)?;
+        let ts: String = row.get(12)?;
+        let verified = verified_signer
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
+            && signature.as_ref().is_some_and(|s| !s.trim().is_empty());
 
         results.push(AutonomyEvent {
             id,
@@ -330,6 +400,10 @@ pub fn list_events(
             reason,
             evidence_json: ev,
             authorized_by: auth,
+            verified_signer,
+            signer_fingerprint,
+            signature,
+            verified,
             created_at: ts,
         });
     }

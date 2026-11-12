@@ -12,17 +12,24 @@
 pub mod error;
 pub mod guard;
 pub mod ledger;
+pub mod signer;
 pub mod soma;
 pub mod tier;
 
 pub use error::AutonomyError;
 pub use guard::{
-    check_capability_autonomy, demote_capability, promote_capability, seed_default_capabilities,
-    AutonomyCheckResult, DemotionRequest, PromotionRequest,
+    build_promotion_payload, check_capability_autonomy, check_capability_autonomy_verified,
+    demote_capability, promote_capability, seed_default_capabilities, AutonomyCheckResult,
+    DemotionRequest, PromotionRequest,
 };
 pub use ledger::{
     generate_event_id, get_state, get_tier, list_events, list_states, record_event,
     AutonomyActionType, AutonomyEvent, AutonomyState,
+};
+pub use signer::{
+    load_detached_signature, resolve_allowed_signers_path, sign_promotion_payload,
+    validate_human_principal, verify_promotion_signature, PromotionProof, PromotionSignPayload,
+    VerifiedPromotionProof, FORBIDDEN_SIGNER_ACTORS, PROMOTE_SIGNATURE_NAMESPACE,
 };
 pub use soma::{is_soma_production_capability, is_soma_production_path, validate_soma_invariant};
 pub use tier::AutonomyTier;

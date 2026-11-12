@@ -326,6 +326,30 @@ pub fn mcp_tools() -> Vec<McpToolDefinition> {
                         "type": "string",
                         "description": "Optional evidence payload or JSON string"
                     },
+                    "sign_key": {
+                        "type": "string",
+                        "description": "SSH key path or inline public key for cryptographic human signer proof (required when promoting to 'autonomous')"
+                    },
+                    "signature": {
+                        "type": "string",
+                        "description": "Detached SSHSIG PEM block or path to signature file (requires signed_at)"
+                    },
+                    "signer_principal": {
+                        "type": "string",
+                        "description": "Principal identity in allowed_signers (defaults to authorized_by)"
+                    },
+                    "allowed_signers": {
+                        "type": "string",
+                        "description": "Optional explicit path to OpenSSH allowed_signers file"
+                    },
+                    "signed_at": {
+                        "type": "string",
+                        "description": "ISO-8601 timestamp bound into canonical promotion payload"
+                    },
+                    "require_verified": {
+                        "type": "boolean",
+                        "description": "Require cryptographic human signer verification even for non-autonomous promotions"
+                    },
                     "branch": {
                         "type": "string",
                         "description": "Optional snapshot branch identifier"
@@ -377,6 +401,10 @@ pub fn mcp_tools() -> Vec<McpToolDefinition> {
                     "actor": {
                         "type": "string",
                         "description": "Actor identifier (default: 'wheelhorse')"
+                    },
+                    "require_verified": {
+                        "type": "boolean",
+                        "description": "Require active tier to be backed by a cryptographically verified human promotion"
                     },
                     "branch": {
                         "type": "string",
@@ -1433,6 +1461,46 @@ fn handle_record_autonomy_event(args: &Value) -> Result<Value, ToolExecutionErro
 
     let event = match event_type {
         "promote" => {
+            let sign_key = args
+                .get("sign_key")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let signature = args
+                .get("signature")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let signer_principal = args
+                .get("signer_principal")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let allowed_signers = args
+                .get("allowed_signers")
+                .and_then(Value::as_str)
+                .map(std::path::PathBuf::from);
+            let signed_at = args
+                .get("signed_at")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let require_verified = args
+                .get("require_verified")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let proof = if sign_key.is_some()
+                || signature.is_some()
+                || signer_principal.is_some()
+                || allowed_signers.is_some()
+                || signed_at.is_some()
+            {
+                Some(crate::autonomy::PromotionProof {
+                    sign_key,
+                    signature,
+                    signer_principal,
+                    allowed_signers,
+                    signed_at,
+                })
+            } else {
+                None
+            };
             let req = crate::autonomy::PromotionRequest {
                 actor: actor.clone(),
                 capability: capability.to_string(),
@@ -1440,6 +1508,8 @@ fn handle_record_autonomy_event(args: &Value) -> Result<Value, ToolExecutionErro
                 reason: reason.to_string(),
                 evidence_json,
                 authorized_by: authorized_by.to_string(),
+                proof,
+                require_verified,
             };
             store.promote_autonomy(&req).map_err(|e| match e {
                 crate::autonomy::AutonomyError::Database(d) => ToolExecutionError::Internal(d),
@@ -1527,11 +1597,15 @@ fn handle_check_autonomy(args: &Value) -> Result<Value, ToolExecutionError> {
                 .filter(|a| !a.is_empty())
         })
         .unwrap_or_else(|| "wheelhorse".to_string());
+    let require_verified = args
+        .get("require_verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let branch = args.get("branch").and_then(Value::as_str);
 
     let store = open_store_target(branch)?;
     let result = store
-        .check_autonomy(&actor, capability, required_tier)
+        .check_autonomy_verified(&actor, capability, required_tier, require_verified)
         .map_err(|e| match e {
             crate::autonomy::AutonomyError::Database(d) => ToolExecutionError::Internal(d),
             other => ToolExecutionError::Client(other.to_string()),
@@ -1544,6 +1618,10 @@ fn handle_check_autonomy(args: &Value) -> Result<Value, ToolExecutionError> {
         "required_tier": result.required_tier.as_str(),
         "permitted": result.permitted,
         "requires_approval": result.requires_approval,
+        "can_execute_autonomously": result.can_execute_autonomously,
+        "verified_promotion": result.verified_promotion,
+        "verified_signer": result.verified_signer,
+        "signer_fingerprint": result.signer_fingerprint,
         "reason": result.reason,
     }))
 }
@@ -2193,6 +2271,25 @@ diff --git a/src/secrets.rs b/src/secrets.rs
         match err {
             ToolExecutionError::Client(msg) => {
                 assert!(msg.contains("strictly require human operator verdicts"));
+            }
+            ToolExecutionError::Internal(e) => panic!("expected client error, got Internal({e})"),
+        }
+
+        // 6. Attempting unsigned promotion to autonomous over MCP must fail closed (CER-3527)
+        assert_eq!(check_res["verified_promotion"], false);
+        let unsigned_promote = json!({
+            "capability": "speculative_optimizer",
+            "actor": "wheelhorse",
+            "event_type": "promote",
+            "to_tier": "autonomous",
+            "reason": "unsigned mcp promotion attempt",
+            "authorized_by": "chris@todie.io"
+        });
+        let err = handle_record_autonomy_event(&unsigned_promote)
+            .expect_err("unsigned autonomous promotion over MCP must fail");
+        match err {
+            ToolExecutionError::Client(msg) => {
+                assert!(msg.contains("requires cryptographic human signer proof"));
             }
             ToolExecutionError::Internal(e) => panic!("expected client error, got Internal({e})"),
         }

@@ -8,7 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::autonomy::error::AutonomyError;
 use crate::autonomy::ledger::{
-    generate_event_id, get_tier, record_event, AutonomyActionType, AutonomyEvent,
+    generate_event_id, get_state, get_tier, record_event, AutonomyActionType, AutonomyEvent,
+};
+use crate::autonomy::signer::{
+    load_detached_signature, resolve_allowed_signers_path, sign_promotion_payload,
+    validate_human_principal, verify_promotion_signature, PromotionProof, PromotionSignPayload,
 };
 use crate::autonomy::soma::{
     is_soma_production_capability, is_soma_production_path, validate_soma_invariant,
@@ -31,6 +35,12 @@ pub struct PromotionRequest {
     pub evidence_json: Option<String>,
     /// Authority authorizing the promotion.
     pub authorized_by: String,
+    /// Optional cryptographic human signer proof (mandatory when promoting to `Autonomous` or when `require_verified` is true, CER-3527).
+    #[serde(default)]
+    pub proof: Option<PromotionProof>,
+    /// Require cryptographic human signer proof even for non-autonomous tier promotions.
+    #[serde(default)]
+    pub require_verified: bool,
 }
 
 /// Parameters for demoting an actor's capability tier.
@@ -71,6 +81,15 @@ pub struct AutonomyCheckResult {
     pub is_soma_production: bool,
     /// Whether the action is permitted to execute autonomously without human review.
     pub can_execute_autonomously: bool,
+    /// True when the active tier was established by a cryptographically verified human promotion (CER-3527).
+    #[serde(default)]
+    pub verified_promotion: bool,
+    /// Authenticated human principal that signed the active promotion, if verified (CER-3527).
+    #[serde(default)]
+    pub verified_signer: Option<String>,
+    /// SSH public key fingerprint that signed the active promotion, if verified (CER-3527).
+    #[serde(default)]
+    pub signer_fingerprint: Option<String>,
     /// Explanatory justification.
     pub reason: String,
 }
@@ -96,6 +115,52 @@ fn validate_evidence_json(evidence_json: &Option<String>) -> Result<(), Autonomy
     Ok(())
 }
 
+/// Construct the canonical `PromotionSignPayload` for a proposed promotion without mutating the ledger.
+pub fn build_promotion_payload(
+    conn: &Connection,
+    actor: &str,
+    capability: &str,
+    target_tier: AutonomyTier,
+    authorized_by: &str,
+    reason: &str,
+    signed_at: Option<&str>,
+) -> Result<PromotionSignPayload, AutonomyError> {
+    validate_non_empty("actor", actor)?;
+    validate_non_empty("capability", capability)?;
+    validate_non_empty("reason", reason)?;
+    validate_non_empty("authorized_by", authorized_by)?;
+    validate_soma_invariant(capability, target_tier)?;
+
+    let current_tier = get_tier(conn, actor, capability)?;
+    if target_tier <= current_tier {
+        return Err(AutonomyError::InvalidTransition {
+            from: current_tier.to_string(),
+            to: target_tier.to_string(),
+            reason: format!(
+                "promotion requires target tier `{target_tier}` to be strictly higher than current tier `{current_tier}`"
+            ),
+        });
+    }
+
+    let at = match signed_at {
+        Some(ts) => {
+            validate_non_empty("signed_at", ts)?;
+            ts.trim().to_string()
+        }
+        None => current_iso_timestamp(),
+    };
+
+    Ok(PromotionSignPayload {
+        actor: actor.to_string(),
+        at,
+        authorized_by: authorized_by.to_string(),
+        capability: capability.to_string(),
+        from: current_tier,
+        reason: reason.to_string(),
+        to: target_tier,
+    })
+}
+
 /// Promote an actor's capability to a higher trust tier.
 ///
 /// Enforces:
@@ -103,6 +168,9 @@ fn validate_evidence_json(evidence_json: &Option<String>) -> Result<(), Autonomy
 /// - Valid JSON syntax for `evidence_json`.
 /// - Soma invariant: Soma production gates can NEVER be promoted to Autonomous.
 /// - Ladder monotonicity: Target tier must be strictly higher than current tier.
+/// - Cryptographic human signer proof (CER-3527): Promoting to `Autonomous` (or when
+///   `require_verified` is set) is refused unless backed by a valid OpenSSH signature
+///   from a human principal verified against `allowed_signers`.
 pub fn promote_capability(
     conn: &Connection,
     req: PromotionRequest,
@@ -128,6 +196,89 @@ pub fn promote_capability(
         });
     }
 
+    let has_proof = req
+        .proof
+        .as_ref()
+        .is_some_and(PromotionProof::has_credentials);
+    let must_verify = req.target_tier == AutonomyTier::Autonomous || req.require_verified;
+
+    if must_verify && !has_proof {
+        return Err(AutonomyError::UnverifiedPromotion(format!(
+            "promotion of actor `{}` capability `{}` to `{}` requires cryptographic human signer proof (CER-3527): pass `--sign-key <ssh-key-or-pubkey>` (or `--signature <sig-path-or-pem> --signed-at <rfc3339>`) verified against `--allowed-signers <path>` / `CICATRIX_ALLOWED_SIGNERS`",
+            req.actor, req.capability, req.target_tier
+        )));
+    }
+
+    let (verified_signer, signer_fingerprint, signature, verified, created_at) = if has_proof {
+        let proof = req.proof.as_ref().expect("checked has_credentials");
+        let has_sign_key = proof
+            .sign_key
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty());
+        let has_detached_sig = proof
+            .signature
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty());
+        if has_sign_key && has_detached_sig {
+            return Err(AutonomyError::Validation(
+                "specify either `--sign-key` or `--signature`, not both".to_string(),
+            ));
+        }
+        if has_detached_sig && proof.signed_at.is_none() {
+            return Err(AutonomyError::Validation(
+                "detached `--signature` requires `--signed-at <rfc3339>` matching the canonical payload `at` timestamp".to_string(),
+            ));
+        }
+
+        // Both authorized_by and signer_principal must pass the human-signer denylist.
+        validate_human_principal(&req.authorized_by)?;
+        let principal_raw = proof
+            .signer_principal
+            .as_deref()
+            .unwrap_or(&req.authorized_by);
+        let principal = validate_human_principal(principal_raw)?;
+
+        let at = match proof.signed_at.as_deref() {
+            Some(ts) => {
+                validate_non_empty("signed_at", ts)?;
+                ts.trim().to_string()
+            }
+            None => current_iso_timestamp(),
+        };
+
+        let payload = PromotionSignPayload {
+            actor: req.actor.clone(),
+            at: at.clone(),
+            authorized_by: req.authorized_by.clone(),
+            capability: req.capability.clone(),
+            from: current_tier,
+            reason: req.reason.clone(),
+            to: req.target_tier,
+        };
+
+        let allowed_signers = resolve_allowed_signers_path(proof.allowed_signers.as_deref())?;
+        let sig_pem = if let Some(ref key) = proof.sign_key {
+            sign_promotion_payload(&payload, key)?
+        } else if let Some(ref sig) = proof.signature {
+            load_detached_signature(sig)?
+        } else {
+            unreachable!("checked has_credentials")
+        };
+
+        let verified_proof =
+            verify_promotion_signature(&payload, &sig_pem, &principal, &allowed_signers)?;
+
+        (
+            Some(verified_proof.principal),
+            verified_proof.fingerprint,
+            Some(verified_proof.signature_pem),
+            true,
+            at,
+        )
+    } else {
+        (None, None, None, false, current_iso_timestamp())
+    };
+
     let event = AutonomyEvent {
         id: generate_event_id(),
         actor: req.actor,
@@ -138,7 +289,11 @@ pub fn promote_capability(
         reason: req.reason,
         evidence_json: req.evidence_json,
         authorized_by: req.authorized_by,
-        created_at: current_iso_timestamp(),
+        verified_signer,
+        signer_fingerprint,
+        signature,
+        verified,
+        created_at,
     };
 
     record_event(conn, &event)?;
@@ -183,6 +338,10 @@ pub fn demote_capability(
         reason: req.reason,
         evidence_json: req.evidence_json,
         authorized_by: req.authorized_by,
+        verified_signer: None,
+        signer_fingerprint: None,
+        signature: None,
+        verified: false,
         created_at: current_iso_timestamp(),
     };
 
@@ -201,18 +360,39 @@ pub fn check_capability_autonomy(
     required_tier: AutonomyTier,
     target_path: Option<&str>,
 ) -> Result<AutonomyCheckResult, AutonomyError> {
-    let current_tier = get_tier(conn, actor, capability)?;
+    check_capability_autonomy_verified(conn, actor, capability, required_tier, target_path, false)
+}
+
+/// Check autonomy permissions with optional enforcement of cryptographic human signer proof (`require_verified`).
+pub fn check_capability_autonomy_verified(
+    conn: &Connection,
+    actor: &str,
+    capability: &str,
+    required_tier: AutonomyTier,
+    target_path: Option<&str>,
+    require_verified: bool,
+) -> Result<AutonomyCheckResult, AutonomyError> {
+    let state = get_state(conn, actor, capability)?;
+    let (current_tier, verified_promotion, verified_signer, signer_fingerprint) = match state {
+        Some(st) => (
+            st.current_tier,
+            st.verified_promotion,
+            st.verified_signer,
+            st.signer_fingerprint,
+        ),
+        None => (AutonomyTier::Shadow, false, None, None),
+    };
     let is_soma = is_soma_production_capability(capability)
         || target_path.is_some_and(is_soma_production_path);
 
     if is_soma {
-        let permitted = if required_tier == AutonomyTier::Autonomous {
-            false
-        } else {
-            current_tier >= required_tier
-        };
+        let permitted = required_tier != AutonomyTier::Autonomous
+            && (!require_verified || verified_promotion)
+            && current_tier >= required_tier;
         let reason = if required_tier == AutonomyTier::Autonomous {
             "Soma production gates strictly require human operator verdicts: autonomous execution is prohibited".to_string()
+        } else if require_verified && !verified_promotion {
+            format!("Soma production gates strictly require human operator verdicts and verified promotion (current tier: `{current_tier}`, verified_promotion: false)")
         } else {
             format!("Soma production gates strictly require human operator verdicts (current tier: `{current_tier}`, required: `{required_tier}`)")
         };
@@ -227,6 +407,35 @@ pub fn check_capability_autonomy(
             requires_approval: true,
             is_soma_production: true,
             can_execute_autonomously: false,
+            verified_promotion,
+            verified_signer,
+            signer_fingerprint,
+            reason,
+        })
+    } else if require_verified && !verified_promotion {
+        let reason = if current_tier >= required_tier {
+            format!(
+                "Actor `{actor}` holds tier `{current_tier}` without cryptographic human signer proof (`verified_promotion: false`); re-promote with `--sign-key` or `--signature`"
+            )
+        } else {
+            format!(
+                "Actor `{actor}` has earned tier `{current_tier}` (unverified) which is insufficient for required tier `{required_tier}`"
+            )
+        };
+
+        Ok(AutonomyCheckResult {
+            actor: actor.to_string(),
+            capability: capability.to_string(),
+            current_tier,
+            tier: current_tier,
+            required_tier,
+            permitted: false,
+            requires_approval: true,
+            is_soma_production: false,
+            can_execute_autonomously: false,
+            verified_promotion: false,
+            verified_signer: None,
+            signer_fingerprint: None,
             reason,
         })
     } else {
@@ -234,9 +443,19 @@ pub fn check_capability_autonomy(
         let can_execute_autonomously = current_tier.is_autonomous() && permitted;
         let requires_approval = !can_execute_autonomously;
         let reason = if permitted {
-            format!("Actor `{actor}` has earned tier `{current_tier}` which meets or exceeds required tier `{required_tier}`")
+            if let Some(ref signer) = verified_signer {
+                format!(
+                    "Actor `{actor}` has earned tier `{current_tier}` (verified by human signer `{signer}`) which meets or exceeds required tier `{required_tier}`"
+                )
+            } else {
+                format!(
+                    "Actor `{actor}` has earned tier `{current_tier}` (unverified) which meets or exceeds required tier `{required_tier}`"
+                )
+            }
         } else {
-            format!("Actor `{actor}` has earned tier `{current_tier}` which is insufficient for required tier `{required_tier}`")
+            format!(
+                "Actor `{actor}` has earned tier `{current_tier}` which is insufficient for required tier `{required_tier}`"
+            )
         };
 
         Ok(AutonomyCheckResult {
@@ -249,6 +468,9 @@ pub fn check_capability_autonomy(
             requires_approval,
             is_soma_production: false,
             can_execute_autonomously,
+            verified_promotion,
+            verified_signer,
+            signer_fingerprint,
             reason,
         })
     }
@@ -339,6 +561,10 @@ pub fn seed_default_capabilities(conn: &Connection) -> Result<(), AutonomyError>
                 reason: reason.to_string(),
                 evidence_json: None,
                 authorized_by: "system_init".to_string(),
+                verified_signer: None,
+                signer_fingerprint: None,
+                signature: None,
+                verified: false,
                 created_at: current_iso_timestamp(),
             };
             record_event(conn, &event)?;
@@ -352,9 +578,27 @@ pub fn seed_default_capabilities(conn: &Connection) -> Result<(), AutonomyError>
 mod tests {
     use super::*;
     use crate::store::sqlite::SqliteStore;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn make_human_signer(dir: &std::path::Path, principal: &str) -> (PathBuf, PathBuf) {
+        let key_path = dir.join("operator_ed25519");
+        let st = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", principal, "-f"])
+            .arg(&key_path)
+            .status()
+            .expect("ssh-keygen runs");
+        assert!(st.success());
+        let pubkey = std::fs::read_to_string(dir.join("operator_ed25519.pub")).unwrap();
+        let allowed = dir.join("allowed_signers");
+        std::fs::write(&allowed, format!("{principal} {pubkey}")).unwrap();
+        (key_path, allowed)
+    }
 
     #[test]
     fn test_promotion_and_demotion_lifecycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (key_path, allowed_signers) = make_human_signer(tmp.path(), "chris@todie.io");
         let store = SqliteStore::open_in_memory().unwrap();
         let conn = store.conn();
 
@@ -362,7 +606,7 @@ mod tests {
         let tier = get_tier(conn, "test-agent", "regression_triage").unwrap();
         assert_eq!(tier, AutonomyTier::Shadow);
 
-        // 2. Promote Shadow -> Supervised
+        // 2. Promote Shadow -> Supervised (lower tier allowed unsigned, marked unverified)
         let req1 = PromotionRequest {
             actor: "test-agent".to_string(),
             capability: "regression_triage".to_string(),
@@ -370,26 +614,55 @@ mod tests {
             reason: "Completed 10 shadow triage passes without errors".to_string(),
             evidence_json: Some(r#"{"passes": 10, "error_count": 0}"#.to_string()),
             authorized_by: "operator".to_string(),
+            proof: None,
+            require_verified: false,
         };
         let evt1 = promote_capability(conn, req1).unwrap();
         assert_eq!(evt1.from_tier, AutonomyTier::Shadow);
         assert_eq!(evt1.to_tier, AutonomyTier::Supervised);
+        assert!(!evt1.verified);
+        assert!(evt1.verified_signer.is_none());
 
         let tier = get_tier(conn, "test-agent", "regression_triage").unwrap();
         assert_eq!(tier, AutonomyTier::Supervised);
 
-        // 3. Promote Supervised -> Autonomous
+        // 3a. Unsigned promotion Supervised -> Autonomous MUST be refused (CER-3527)
+        let req_unsigned = PromotionRequest {
+            actor: "test-agent".to_string(),
+            capability: "regression_triage".to_string(),
+            target_tier: AutonomyTier::Autonomous,
+            reason: "Attempt unsigned autonomous promotion".to_string(),
+            evidence_json: None,
+            authorized_by: "chris@todie.io".to_string(),
+            proof: None,
+            require_verified: false,
+        };
+        assert!(matches!(
+            promote_capability(conn, req_unsigned),
+            Err(AutonomyError::UnverifiedPromotion(_))
+        ));
+
+        // 3b. Signed promotion Supervised -> Autonomous succeeds and records verified_signer
         let req2 = PromotionRequest {
             actor: "test-agent".to_string(),
             capability: "regression_triage".to_string(),
             target_tier: AutonomyTier::Autonomous,
             reason: "Passed all regression verification gates and benchmarks".to_string(),
             evidence_json: Some(r#"{"bench_score": 99.4}"#.to_string()),
-            authorized_by: "operator".to_string(),
+            authorized_by: "chris@todie.io".to_string(),
+            proof: Some(PromotionProof {
+                sign_key: Some(key_path.to_string_lossy().into_owned()),
+                allowed_signers: Some(allowed_signers.clone()),
+                ..Default::default()
+            }),
+            require_verified: false,
         };
         let evt2 = promote_capability(conn, req2).unwrap();
         assert_eq!(evt2.from_tier, AutonomyTier::Supervised);
         assert_eq!(evt2.to_tier, AutonomyTier::Autonomous);
+        assert!(evt2.verified);
+        assert_eq!(evt2.verified_signer.as_deref(), Some("chris@todie.io"));
+        assert!(evt2.signature.is_some());
 
         let tier = get_tier(conn, "test-agent", "regression_triage").unwrap();
         assert_eq!(tier, AutonomyTier::Autonomous);
@@ -401,11 +674,17 @@ mod tests {
             target_tier: AutonomyTier::Autonomous,
             reason: "Redundant promotion".to_string(),
             evidence_json: None,
-            authorized_by: "operator".to_string(),
+            authorized_by: "chris@todie.io".to_string(),
+            proof: Some(PromotionProof {
+                sign_key: Some(key_path.to_string_lossy().into_owned()),
+                allowed_signers: Some(allowed_signers),
+                ..Default::default()
+            }),
+            require_verified: false,
         };
         assert!(promote_capability(conn, req_invalid).is_err());
 
-        // 5. Demote Autonomous -> Supervised
+        // 5. Demote Autonomous -> Supervised requires NO signature
         let demote_req = DemotionRequest {
             actor: "test-agent".to_string(),
             capability: "regression_triage".to_string(),
@@ -417,6 +696,7 @@ mod tests {
         let evt_demote = demote_capability(conn, demote_req).unwrap();
         assert_eq!(evt_demote.from_tier, AutonomyTier::Autonomous);
         assert_eq!(evt_demote.to_tier, AutonomyTier::Supervised);
+        assert!(!evt_demote.verified);
 
         let tier = get_tier(conn, "test-agent", "regression_triage").unwrap();
         assert_eq!(tier, AutonomyTier::Supervised);
@@ -434,6 +714,8 @@ mod tests {
             reason: "Attempt unauthorized promotion of production gate".to_string(),
             evidence_json: None,
             authorized_by: "rogue-agent".to_string(),
+            proof: None,
+            require_verified: false,
         };
 
         let result = promote_capability(conn, req);
@@ -444,21 +726,29 @@ mod tests {
 
     #[test]
     fn test_autonomy_check_soma_surface() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (key_path, allowed_signers) = make_human_signer(tmp.path(), "chris@todie.io");
         let store = SqliteStore::open_in_memory().unwrap();
         let conn = store.conn();
 
-        // Promote background_ops to Autonomous
+        // Promote background_ops to Autonomous with verified human signature
         let req = PromotionRequest {
             actor: "agent-1".to_string(),
             capability: "background_ops".to_string(),
             target_tier: AutonomyTier::Autonomous,
             reason: "Promote for background work".to_string(),
             evidence_json: None,
-            authorized_by: "operator".to_string(),
+            authorized_by: "chris@todie.io".to_string(),
+            proof: Some(PromotionProof {
+                sign_key: Some(key_path.to_string_lossy().into_owned()),
+                allowed_signers: Some(allowed_signers),
+                ..Default::default()
+            }),
+            require_verified: false,
         };
         promote_capability(conn, req).unwrap();
 
-        // 1. Check ordinary path -> can execute autonomously
+        // 1. Check ordinary path -> can execute autonomously & verified_promotion = true
         let check1 = check_capability_autonomy(
             conn,
             "agent-1",
@@ -471,6 +761,8 @@ mod tests {
         assert!(!check1.is_soma_production);
         assert!(check1.permitted);
         assert!(!check1.requires_approval);
+        assert!(check1.verified_promotion);
+        assert_eq!(check1.verified_signer.as_deref(), Some("chris@todie.io"));
 
         // 2. Check Soma production path -> rejected, requires human verdict
         let check2 = check_capability_autonomy(

@@ -2188,11 +2188,27 @@ fn autonomy_cli_status_and_defaults() {
     assert_eq!(v_unrec["tier"], "shadow");
 }
 
+fn generate_test_ssh_key(dir: &Path, name: &str, comment: &str) -> (std::path::PathBuf, String) {
+    let key_path = dir.join(name);
+    let st = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", comment, "-f"])
+        .arg(&key_path)
+        .status()
+        .expect("ssh-keygen must be available");
+    assert!(st.success(), "ssh-keygen failed");
+    let pubkey = std::fs::read_to_string(dir.join(format!("{name}.pub"))).expect("read pubkey");
+    (key_path, pubkey)
+}
+
 #[test]
 fn autonomy_cli_promote_check_demote_history_lifecycle() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("autonomy_lifecycle.db");
     let db_str = db_path.to_str().unwrap();
+    let (chris_key, chris_pub) =
+        generate_test_ssh_key(tmp.path(), "chris_ed25519", "chris@todie.io");
+    let allowed_signers = tmp.path().join("allowed_signers");
+    std::fs::write(&allowed_signers, format!("chris@todie.io {chris_pub}")).unwrap();
     let envs = [("CICATRIX_DB_PATH", db_str)];
 
     // 1. Check initially fails for supervised requirement when tier is shadow (unrecorded)
@@ -2273,7 +2289,32 @@ fn autonomy_cli_promote_check_demote_history_lifecycle() {
     );
     assert!(!out_check3.status.success());
 
-    // 5. Promote to autonomous with JSON output
+    // 5a. Unsigned promote to autonomous is REFUSED (CER-3527)
+    let out_promote_unsigned = run_with_env(
+        &[
+            "autonomy",
+            "promote",
+            "--actor",
+            "agent_x",
+            "--capability",
+            "background_ops",
+            "--to",
+            "autonomous",
+            "--reason",
+            "Exceeded benchmark thresholds",
+            "--authorized-by",
+            "chris@todie.io",
+        ],
+        &envs,
+    );
+    assert!(!out_promote_unsigned.status.success());
+    let stderr_unsigned = String::from_utf8_lossy(&out_promote_unsigned.stderr);
+    assert!(
+        stderr_unsigned.contains("unverified promotion refused"),
+        "expected refusal stderr, got: {stderr_unsigned}"
+    );
+
+    // 5b. Signed promote to autonomous with JSON output succeeds
     let out_promote2 = run_with_env(
         &[
             "autonomy",
@@ -2287,18 +2328,28 @@ fn autonomy_cli_promote_check_demote_history_lifecycle() {
             "--reason",
             "Exceeded benchmark thresholds",
             "--authorized-by",
-            "operator",
+            "chris@todie.io",
+            "--sign-key",
+            chris_key.to_str().unwrap(),
+            "--allowed-signers",
+            allowed_signers.to_str().unwrap(),
             "--json",
         ],
         &envs,
     );
-    assert!(out_promote2.status.success());
+    assert!(
+        out_promote2.status.success(),
+        "promote failed: {}",
+        String::from_utf8_lossy(&out_promote2.stderr)
+    );
     let v_prom: serde_json::Value =
         serde_json::from_slice(&out_promote2.stdout).expect("valid json");
     assert_eq!(v_prom["to_tier"], "autonomous");
     assert_eq!(v_prom["from_tier"], "supervised");
+    assert_eq!(v_prom["verified"], true);
+    assert_eq!(v_prom["verified_signer"], "chris@todie.io");
 
-    // 6. Check now passes for autonomous
+    // 6. Check now passes for autonomous and reports verified_promotion + verified_signer
     let out_check4 = run_with_env(
         &[
             "autonomy",
@@ -2318,8 +2369,10 @@ fn autonomy_cli_promote_check_demote_history_lifecycle() {
     assert_eq!(v_chk["permitted"], true);
     assert_eq!(v_chk["can_execute_autonomously"], true);
     assert_eq!(v_chk["requires_approval"], false);
+    assert_eq!(v_chk["verified_promotion"], true);
+    assert_eq!(v_chk["verified_signer"], "chris@todie.io");
 
-    // 7. Demote back to supervised
+    // 7. Demote back to supervised (no signature needed)
     let out_demote = run_with_env(
         &[
             "autonomy",
@@ -2343,7 +2396,7 @@ fn autonomy_cli_promote_check_demote_history_lifecycle() {
         "DEMOTED: actor `agent_x` capability `background_ops` from `autonomous` to `supervised`"
     ));
 
-    // 8. History reflects promotions and demotions
+    // 8. History reflects promotions, verified_signer on autonomous promote, and demotions
     let out_hist = run_with_env(
         &[
             "autonomy",
@@ -2361,8 +2414,455 @@ fn autonomy_cli_promote_check_demote_history_lifecycle() {
     let arr = v_hist.as_array().expect("array of history events");
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0]["action_type"], "demote");
+    assert_eq!(arr[0]["verified"], false);
+    assert!(arr[0]["verified_signer"].is_null());
     assert_eq!(arr[1]["action_type"], "promote");
+    assert_eq!(arr[1]["verified"], true);
+    assert_eq!(arr[1]["verified_signer"], "chris@todie.io");
     assert_eq!(arr[2]["action_type"], "promote");
+    assert_eq!(arr[2]["verified"], false);
+    assert!(arr[2]["verified_signer"].is_null());
+}
+
+#[test]
+fn autonomy_cli_verified_human_signer_proof_cer_3527() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("cer_3527.db");
+    let db_str = db_path.to_str().unwrap();
+
+    let (chris_key, chris_pub) =
+        generate_test_ssh_key(tmp.path(), "chris_ed25519", "chris@todie.io");
+    let (rogue_key, _) = generate_test_ssh_key(tmp.path(), "rogue_ed25519", "rogue@todie.io");
+    let (bot_key, bot_pub) =
+        generate_test_ssh_key(tmp.path(), "bot_ed25519", "claude-bot@cerebral.work");
+    let (gha_key, gha_pub) =
+        generate_test_ssh_key(tmp.path(), "gha_ed25519", "github-actions[bot]");
+
+    let allowed_signers = tmp.path().join("allowed_signers");
+    std::fs::write(
+        &allowed_signers,
+        format!(
+            "chris@todie.io {chris_pub}claude-bot@cerebral.work {bot_pub}github-actions[bot] {gha_pub}"
+        ),
+    )
+    .unwrap();
+    let allowed_str = allowed_signers.to_str().unwrap();
+    let envs = [
+        ("CICATRIX_DB_PATH", db_str),
+        ("CICATRIX_ALLOWED_SIGNERS", allowed_str),
+    ];
+
+    // 1. Unsigned promote to `autonomous` is REFUSED (--json and human modes).
+    let out_unsigned = run_with_env(
+        &[
+            "autonomy",
+            "promote",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--to",
+            "autonomous",
+            "--reason",
+            "Attempt unsigned promotion",
+            "--authorized-by",
+            "chris@todie.io",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(!out_unsigned.status.success());
+    let v_unsigned: serde_json::Value =
+        serde_json::from_slice(&out_unsigned.stdout).expect("valid error json");
+    assert_eq!(v_unsigned["status"], "error");
+    assert!(v_unsigned["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("unverified promotion refused"));
+
+    // 2. Bot-principal (`claude-bot@cerebral.work` and `github-actions[bot]`) signed promote is REFUSED
+    //    even though their keys exist in `allowed_signers`.
+    for (bot_principal, key) in [
+        ("claude-bot@cerebral.work", &bot_key),
+        ("github-actions[bot]", &gha_key),
+    ] {
+        let out_bot = run_with_env(
+            &[
+                "autonomy",
+                "promote",
+                "--actor",
+                "vilicus-lane",
+                "--capability",
+                "train-delivery",
+                "--to",
+                "autonomous",
+                "--reason",
+                "Attempt automated self-promotion",
+                "--authorized-by",
+                bot_principal,
+                "--sign-key",
+                key.to_str().unwrap(),
+            ],
+            &envs,
+        );
+        assert!(
+            !out_bot.status.success(),
+            "bot principal `{bot_principal}` must be refused"
+        );
+        let stderr = String::from_utf8_lossy(&out_bot.stderr);
+        assert!(
+            stderr.contains("non-human signer rejected"),
+            "unexpected stderr for `{bot_principal}`: {stderr}"
+        );
+    }
+
+    // 3a. Wrong key (not in `allowed_signers` for `chris@todie.io`) is REFUSED.
+    let out_wrong_key = run_with_env(
+        &[
+            "autonomy",
+            "promote",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--to",
+            "autonomous",
+            "--reason",
+            "Signed with rogue key",
+            "--authorized-by",
+            "chris@todie.io",
+            "--sign-key",
+            rogue_key.to_str().unwrap(),
+        ],
+        &envs,
+    );
+    assert!(!out_wrong_key.status.success());
+    let stderr_wrong = String::from_utf8_lossy(&out_wrong_key.stderr);
+    assert!(
+        stderr_wrong.contains("signature verification failed"),
+        "unexpected stderr: {stderr_wrong}"
+    );
+
+    // 3b. Detached signature with tampered payload is REFUSED; exact detached signature SUCCEEDS.
+    let signed_at = "2026-11-12T17:15:00.000Z";
+    let payload_out = run_with_env(
+        &[
+            "autonomy",
+            "promote",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--to",
+            "autonomous",
+            "--reason",
+            "Verified 30 green runs",
+            "--authorized-by",
+            "chris@todie.io",
+            "--signed-at",
+            signed_at,
+            "--print-payload",
+        ],
+        &envs,
+    );
+    assert!(payload_out.status.success());
+
+    // Sign the canonical payload with `ssh-keygen -Y sign`
+    let sig_file = tmp.path().join("detached.sig");
+    {
+        let mut sign_child = Command::new("ssh-keygen")
+            .args([
+                "-Y",
+                "sign",
+                "-q",
+                "-n",
+                "cicatrix.autonomy.promote@v1",
+                "-f",
+                chris_key.to_str().unwrap(),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn ssh-keygen -Y sign");
+        sign_child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&payload_out.stdout)
+            .unwrap();
+        let sign_out = sign_child.wait_with_output().unwrap();
+        assert!(sign_out.status.success());
+        std::fs::write(&sig_file, &sign_out.stdout).unwrap();
+    }
+
+    // Tampered reason with the detached signature MUST be refused!
+    let out_tampered = run_with_env(
+        &[
+            "autonomy",
+            "promote",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--to",
+            "autonomous",
+            "--reason",
+            "Tampered reason after signing",
+            "--authorized-by",
+            "chris@todie.io",
+            "--signature",
+            sig_file.to_str().unwrap(),
+            "--signed-at",
+            signed_at,
+        ],
+        &envs,
+    );
+    assert!(!out_tampered.status.success());
+    assert!(String::from_utf8_lossy(&out_tampered.stderr).contains("signature verification failed"));
+
+    // 4. Valid human Ed25519 SSH signature (`chris@todie.io` in `allowed_signers`) SUCCEEDS!
+    let out_valid = run_with_env(
+        &[
+            "autonomy",
+            "promote",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--to",
+            "autonomous",
+            "--reason",
+            "Verified 30 green runs",
+            "--authorized-by",
+            "chris@todie.io",
+            "--signature",
+            sig_file.to_str().unwrap(),
+            "--signed-at",
+            signed_at,
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(
+        out_valid.status.success(),
+        "valid detached signature failed: {}",
+        String::from_utf8_lossy(&out_valid.stderr)
+    );
+
+    // Verify `autonomy history --json` shows `verified_signer: "chris@todie.io"`
+    let out_hist = run_with_env(
+        &[
+            "autonomy",
+            "history",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(out_hist.status.success());
+    let hist_arr: serde_json::Value = serde_json::from_slice(&out_hist.stdout).unwrap();
+    assert_eq!(hist_arr[0]["verified_signer"], "chris@todie.io");
+    assert_eq!(hist_arr[0]["verified"], true);
+    assert!(hist_arr[0]["signer_fingerprint"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("SHA256:"));
+
+    // Verify `autonomy check --json` and `autonomy check --require-verified --json`
+    for args in [
+        vec![
+            "autonomy",
+            "check",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--tier",
+            "autonomous",
+            "--json",
+        ],
+        vec![
+            "autonomy",
+            "check",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--tier",
+            "autonomous",
+            "--require-verified",
+            "--json",
+        ],
+    ] {
+        let out_chk = run_with_env(&args, &envs);
+        assert!(out_chk.status.success());
+        let v_chk: serde_json::Value = serde_json::from_slice(&out_chk.stdout).unwrap();
+        assert_eq!(v_chk["permitted"], true);
+        assert_eq!(v_chk["can_execute_autonomously"], true);
+        assert_eq!(v_chk["verified_promotion"], true);
+        assert_eq!(v_chk["verified_signer"], "chris@todie.io");
+    }
+
+    // 6. Demotion from `autonomous` succeeds immediately with ZERO signature required!
+    let out_demote = run_with_env(
+        &[
+            "autonomy",
+            "demote",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--to",
+            "supervised",
+            "--reason",
+            "Revoke autonomous authority immediately",
+            "--authorized-by",
+            "harness",
+        ],
+        &envs,
+    );
+    assert!(
+        out_demote.status.success(),
+        "demote failed: {}",
+        String::from_utf8_lossy(&out_demote.stderr)
+    );
+
+    let out_after_demote = run_with_env(
+        &[
+            "autonomy",
+            "check",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--tier",
+            "autonomous",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(!out_after_demote.status.success());
+    let v_after: serde_json::Value = serde_json::from_slice(&out_after_demote.stdout).unwrap();
+    assert_eq!(v_after["current_tier"], "supervised");
+    assert_eq!(v_after["can_execute_autonomously"], false);
+    assert_eq!(v_after["verified_promotion"], false);
+    assert!(v_after["verified_signer"].is_null());
+}
+
+#[test]
+fn autonomy_cli_legacy_unverified_db_migration_and_check_cer_3527() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("legacy_pre_cer_3527.db");
+
+    // Simulate a pre-CER-3527 database with original 0003_autonomy_ledger schema
+    // (no verified_signer / signer_fingerprint / signature columns) and a pre-existing
+    // unverified `vilicus-lane` / `train-delivery` promotion row.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE autonomy_ledger (
+                id TEXT PRIMARY KEY NOT NULL,
+                actor TEXT NOT NULL,
+                capability TEXT NOT NULL,
+                from_tier TEXT NOT NULL,
+                to_tier TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                evidence_json TEXT,
+                authorized_by TEXT NOT NULL DEFAULT 'operator',
+                created_at TEXT NOT NULL
+            );
+            CREATE TRIGGER prevent_autonomy_ledger_update
+            BEFORE UPDATE ON autonomy_ledger
+            BEGIN
+                SELECT RAISE(ABORT, 'autonomy_ledger is append-only: updates are prohibited');
+            END;
+            CREATE TRIGGER prevent_autonomy_ledger_delete
+            BEFORE DELETE ON autonomy_ledger
+            BEGIN
+                SELECT RAISE(ABORT, 'autonomy_ledger is append-only: deletions are prohibited');
+            END;
+            CREATE TABLE autonomy_state (
+                actor TEXT NOT NULL,
+                capability TEXT NOT NULL,
+                current_tier TEXT NOT NULL,
+                last_event_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (actor, capability),
+                FOREIGN KEY (last_event_id) REFERENCES autonomy_ledger(id) ON DELETE RESTRICT
+            );
+            CREATE TRIGGER update_autonomy_state_after_insert
+            AFTER INSERT ON autonomy_ledger
+            BEGIN
+                INSERT INTO autonomy_state (actor, capability, current_tier, last_event_id, updated_at)
+                VALUES (NEW.actor, NEW.capability, NEW.to_tier, NEW.id, NEW.created_at)
+                ON CONFLICT(actor, capability) DO UPDATE SET
+                    current_tier = NEW.to_tier,
+                    last_event_id = NEW.id,
+                    updated_at = NEW.created_at;
+            END;
+            INSERT INTO autonomy_ledger (id, actor, capability, from_tier, to_tier, action_type, reason, authorized_by, created_at)
+            VALUES ('aut_evt_legacy_001', 'vilicus-lane', 'train-delivery', 'supervised', 'autonomous', 'promote', 'Pre-CER-3527 promotion', 'operator', '2026-11-08T00:00:00.000Z');",
+        )
+        .unwrap();
+    }
+
+    let db_str = db_path.to_str().unwrap();
+    let envs = [("CICATRIX_DB_PATH", db_str)];
+
+    // 5a. Standard `autonomy check --json` migrates cleanly and reports `verified_promotion: false, verified_signer: null`
+    //     while keeping legacy ladder compatibility until callers pass `--require-verified`.
+    let out_legacy = run_with_env(
+        &[
+            "autonomy",
+            "check",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--tier",
+            "autonomous",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(
+        out_legacy.status.success(),
+        "legacy check failed: {}",
+        String::from_utf8_lossy(&out_legacy.stderr)
+    );
+    let v_legacy: serde_json::Value = serde_json::from_slice(&out_legacy.stdout).unwrap();
+    assert_eq!(v_legacy["permitted"], true);
+    assert_eq!(v_legacy["can_execute_autonomously"], true);
+    assert_eq!(v_legacy["verified_promotion"], false);
+    assert!(v_legacy["verified_signer"].is_null());
+
+    // 5b. `autonomy check --require-verified --json` rejects the unverified legacy promotion!
+    let out_strict = run_with_env(
+        &[
+            "autonomy",
+            "check",
+            "--actor",
+            "vilicus-lane",
+            "--capability",
+            "train-delivery",
+            "--tier",
+            "autonomous",
+            "--require-verified",
+            "--json",
+        ],
+        &envs,
+    );
+    assert!(!out_strict.status.success());
+    let v_strict: serde_json::Value = serde_json::from_slice(&out_strict.stdout).unwrap();
+    assert_eq!(v_strict["permitted"], false);
+    assert_eq!(v_strict["can_execute_autonomously"], false);
+    assert_eq!(v_strict["requires_approval"], true);
+    assert_eq!(v_strict["verified_promotion"], false);
+    assert!(v_strict["verified_signer"].is_null());
 }
 
 #[test]

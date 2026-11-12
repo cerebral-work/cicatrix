@@ -25,6 +25,9 @@ pub const AUTONOMY_SCHEMA: &str = include_str!("../../migrations/0003_autonomy_l
 pub const CORTEX_SCHEMA: &str = include_str!("../../migrations/0004_cortex_settle_events.sql");
 /// Replication log schema migration embedded at compile time (CER-2765, Phase 4.4).
 pub const REPLICATION_SCHEMA: &str = include_str!("../../migrations/0005_replication_log.sql");
+/// Autonomy verified-signer migration embedded at compile time (CER-3527).
+pub const AUTONOMY_VERIFIED_SIGNER_SCHEMA: &str =
+    include_str!("../../migrations/0006_autonomy_verified_signer.sql");
 
 #[cfg(test)]
 pub static TEST_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -147,13 +150,63 @@ fn apply_pragmas(conn: &Connection) -> io::Result<()> {
     Ok(())
 }
 
+fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) -> io::Result<()> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table});"))
+        .map_err(sqlite_to_io)?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(sqlite_to_io)?;
+    for col in cols {
+        if col.map_err(sqlite_to_io)? == column {
+            return Ok(());
+        }
+    }
+    match conn.execute(alter_sql, []) {
+        Ok(_) => Ok(()),
+        Err(err)
+            if err
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(sqlite_to_io(err)),
+    }
+}
+
 fn apply_migrations(conn: &Connection) -> io::Result<()> {
     conn.execute_batch(INITIAL_SCHEMA).map_err(sqlite_to_io)?;
     // Idempotent migration for existing pre-frontier databases:
-    let _ = conn.execute("ALTER TABLE bug_facts ADD COLUMN frontier TEXT;", []);
+    ensure_column(
+        conn,
+        "bug_facts",
+        "frontier",
+        "ALTER TABLE bug_facts ADD COLUMN frontier TEXT;",
+    )?;
     conn.execute_batch(TRIPWIRE_SCHEMA).map_err(sqlite_to_io)?;
     let _ = crate::tripwire::seed_canaries(conn)?;
     conn.execute_batch(AUTONOMY_SCHEMA).map_err(sqlite_to_io)?;
+    // Idempotent additive migration for pre-CER-3527 autonomy_ledger databases:
+    ensure_column(
+        conn,
+        "autonomy_ledger",
+        "verified_signer",
+        "ALTER TABLE autonomy_ledger ADD COLUMN verified_signer TEXT CHECK (verified_signer IS NULL OR length(trim(verified_signer)) > 0);",
+    )?;
+    ensure_column(
+        conn,
+        "autonomy_ledger",
+        "signer_fingerprint",
+        "ALTER TABLE autonomy_ledger ADD COLUMN signer_fingerprint TEXT CHECK (signer_fingerprint IS NULL OR length(trim(signer_fingerprint)) > 0);",
+    )?;
+    ensure_column(
+        conn,
+        "autonomy_ledger",
+        "signature",
+        "ALTER TABLE autonomy_ledger ADD COLUMN signature TEXT CHECK (signature IS NULL OR length(trim(signature)) > 0);",
+    )?;
     crate::autonomy::seed_default_capabilities(conn)
         .map_err(|e| io::Error::other(e.to_string()))?;
     conn.execute_batch(CORTEX_SCHEMA).map_err(sqlite_to_io)?;
@@ -729,6 +782,25 @@ impl SqliteStore {
         )
     }
 
+    /// Check if an actor's capability has sufficient autonomy tier, optionally requiring
+    /// cryptographic human signer verification on the active promotion (CER-3527).
+    pub fn check_autonomy_verified(
+        &self,
+        actor: &str,
+        capability: &str,
+        required_tier: crate::autonomy::AutonomyTier,
+        require_verified: bool,
+    ) -> Result<crate::autonomy::AutonomyCheckResult, crate::autonomy::AutonomyError> {
+        crate::autonomy::check_capability_autonomy_verified(
+            &self.conn,
+            actor,
+            capability,
+            required_tier,
+            None,
+            require_verified,
+        )
+    }
+
     // --- Cortex settle learning loop outbox integration (CER-2764, Phase 4.3) ---
 
     /// Ingest a single Cortex settle event through the given consumer.
@@ -1142,5 +1214,55 @@ mod tests {
             soma_gate.unwrap().tier,
             crate::autonomy::AutonomyTier::Supervised
         );
+    }
+
+    #[test]
+    fn concurrent_legacy_autonomy_migration_is_race_safe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("legacy_race.db");
+        {
+            let conn = Connection::open(&db_path).expect("open raw legacy db");
+            apply_pragmas(&conn).expect("pragmas");
+            conn.execute_batch(
+                "CREATE TABLE autonomy_ledger (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    actor TEXT NOT NULL,
+                    capability TEXT NOT NULL,
+                    from_tier TEXT NOT NULL,
+                    to_tier TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    evidence_json TEXT,
+                    authorized_by TEXT NOT NULL DEFAULT 'operator',
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE autonomy_state (
+                    actor TEXT NOT NULL,
+                    capability TEXT NOT NULL,
+                    current_tier TEXT NOT NULL,
+                    last_event_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (actor, capability)
+                );",
+            )
+            .expect("seed pre-CER-3527 tables");
+        }
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let p = db_path.clone();
+                let b = barrier.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    let store = SqliteStore::open(&p).expect("concurrent open + migrate");
+                    let states = store.list_autonomy_states(None).expect("list states");
+                    assert!(!states.is_empty());
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread succeeded");
+        }
     }
 }

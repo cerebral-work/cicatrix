@@ -69,7 +69,7 @@ fn main() -> ExitCode {
                  context <assemble --prompt <p> <paths...> [--limit <N>] [--as-of <c>] [--frontier <f>] [--branch <b>] [--actor <a>] [--fail-soft <bool>] [--json]> | \
                  reversibility <eval|classify|plan|validate> [--diff <path>] [--tier <shadow|supervised|autonomous>] [--json] | \
                  tripwire <list [--json] | check <target> [--content <text>] [--actor <actor>] [--action <action>] [--json] | touches [--limit <N>] [--canary <id>] [--json] | seed> | \
-                 autonomy <status [--actor <actor>] [--capability <capability>] [--json] | promote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | demote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | history [--actor <actor>] [--capability <capability>] [--limit <N>] [--json] | check --actor <actor> --capability <capability> --tier <tier> [--json]> | \
+                 autonomy <status [--actor <actor>] [--capability <capability>] [--json] | promote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--sign-key <key> | --signature <sig> --signed-at <rfc3339>] [--signer-principal <principal>] [--allowed-signers <path>] [--require-verified] [--print-payload] [--evidence <json>] [--json] | demote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | history [--actor <actor>] [--capability <capability>] [--limit <N>] [--json] | check --actor <actor> --capability <capability> --tier <tier> [--require-verified] [--json]> | \
                  cortex <ingest-settle [--file <path>] [--raw <json>] [--observed-dir <path>] [--actor <actor>] [--json] | settle-status [--json] | settle-events [--source <source>] [--negative <bool>] [--job <id>] [--limit <N>] [--json]> | \
                  replication <export --since <tx> [--until <tx>] [--limit <N>] [--out <file>] [--actor <actor>] [--json] | apply (--file <path> | --raw <json>) [--actor <actor>] [--json] | status [--peer <id>] [--json] | sync --peer-url <url> [--peer-id <id>] [--actor <actor>] [--json]> | \
                  diagnose <target> [--log <file|text>] [--repro <cmd>] [--files <list>] [--forks <N>] [--out-dir <dir>] [--out <file>] [--no-write] [--json] | \
@@ -2559,10 +2559,10 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
     if rest.is_empty() {
         eprintln!(
             "usage: cicatrix autonomy <status [--actor <actor>] [--capability <capability>] [--json] | \
-             promote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | \
+             promote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--sign-key <key> | --signature <sig> --signed-at <rfc3339>] [--signer-principal <principal>] [--allowed-signers <path>] [--require-verified] [--print-payload] [--evidence <json>] [--json] | \
              demote --actor <actor> --capability <capability> --to <tier> --reason <reason> --authorized-by <user> [--evidence <json>] [--json] | \
              history [--actor <actor>] [--capability <capability>] [--limit <N>] [--json] | \
-             check --actor <actor> --capability <capability> --tier <tier> [--json]>"
+             check --actor <actor> --capability <capability> --tier <tier> [--require-verified] [--json]>"
         );
         return ExitCode::FAILURE;
     }
@@ -2626,6 +2626,10 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
                             println!("Actor: {}", st.actor);
                             println!("Capability: {}", st.capability);
                             println!("Current Tier: {}", st.current_tier);
+                            println!("Verified Promotion: {}", st.verified_promotion);
+                            if let Some(ref signer) = st.verified_signer {
+                                println!("Verified Signer: {signer}");
+                            }
                             println!("Last Event: {}", st.last_event_id);
                             println!("Updated At: {}", st.updated_at);
                         }
@@ -2641,6 +2645,8 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
                                     "tier": "shadow",
                                     "last_action": "default",
                                     "authorized_by": "system",
+                                    "verified_promotion": false,
+                                    "verified_signer": null,
                                     "updated_at": null
                                 })
                             );
@@ -2698,6 +2704,13 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
             let mut reason: Option<String> = None;
             let mut authorized_by: Option<String> = None;
             let mut evidence_json: Option<String> = None;
+            let mut sign_key: Option<String> = None;
+            let mut signature: Option<String> = None;
+            let mut signer_principal: Option<String> = None;
+            let mut allowed_signers: Option<std::path::PathBuf> = None;
+            let mut signed_at: Option<String> = None;
+            let mut require_verified = false;
+            let mut print_payload = false;
             let mut json_output = false;
 
             let mut it = sub_args.iter();
@@ -2754,6 +2767,51 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                     },
+                    "--sign-key" => match it.next() {
+                        Some(k) => sign_key = Some(k.clone()),
+                        None => {
+                            eprintln!(
+                                "cicatrix autonomy promote: --sign-key requires <ssh-key-or-pubkey>"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--signature" => match it.next() {
+                        Some(s) => signature = Some(s.clone()),
+                        None => {
+                            eprintln!(
+                                "cicatrix autonomy promote: --signature requires <sig-path-or-pem>"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--signer-principal" => match it.next() {
+                        Some(sp) => signer_principal = Some(sp.clone()),
+                        None => {
+                            eprintln!(
+                                "cicatrix autonomy promote: --signer-principal requires <principal>"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--allowed-signers" => match it.next() {
+                        Some(as_path) => allowed_signers = Some(std::path::PathBuf::from(as_path)),
+                        None => {
+                            eprintln!(
+                                "cicatrix autonomy promote: --allowed-signers requires <path>"
+                            );
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--signed-at" => match it.next() {
+                        Some(ts) => signed_at = Some(ts.clone()),
+                        None => {
+                            eprintln!("cicatrix autonomy promote: --signed-at requires <rfc3339>");
+                            return ExitCode::FAILURE;
+                        }
+                    },
+                    "--require-verified" => require_verified = true,
+                    "--print-payload" => print_payload = true,
                     "--json" => json_output = true,
                     unknown => {
                         eprintln!("cicatrix autonomy promote: unknown option `{unknown}`");
@@ -2807,6 +2865,46 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
                 }
             };
 
+            if print_payload {
+                match crate::autonomy::build_promotion_payload(
+                    store.conn(),
+                    &actor,
+                    &capability,
+                    to_tier,
+                    &authorized_by,
+                    &reason,
+                    signed_at.as_deref(),
+                )
+                .and_then(|p| p.canonical_json())
+                {
+                    Ok(canonical) => {
+                        print!("{canonical}");
+                        return ExitCode::SUCCESS;
+                    }
+                    Err(e) => {
+                        eprintln!("cicatrix autonomy promote --print-payload failed: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+
+            let proof = if sign_key.is_some()
+                || signature.is_some()
+                || signer_principal.is_some()
+                || allowed_signers.is_some()
+                || signed_at.is_some()
+            {
+                Some(crate::autonomy::PromotionProof {
+                    sign_key,
+                    signature,
+                    signer_principal,
+                    allowed_signers,
+                    signed_at,
+                })
+            } else {
+                None
+            };
+
             let req = crate::autonomy::PromotionRequest {
                 actor,
                 capability,
@@ -2814,6 +2912,8 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
                 reason,
                 evidence_json,
                 authorized_by,
+                proof,
+                require_verified,
             };
 
             match store.promote_autonomy(&req) {
@@ -2826,9 +2926,14 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
                                 return ExitCode::FAILURE;
                             }
                         }
+                    } else if let Some(ref signer) = event.verified_signer {
+                        println!(
+                            "PROMOTED: actor `{}` capability `{}` from `{}` to `{}` (verified_signer: {}, event_id: {})",
+                            event.actor, event.capability, event.from_tier, event.to_tier, signer, event.id
+                        );
                     } else {
                         println!(
-                            "PROMOTED: actor `{}` capability `{}` from `{}` to `{}` (event_id: {})",
+                            "PROMOTED: actor `{}` capability `{}` from `{}` to `{}` (unverified, event_id: {})",
                             event.actor, event.capability, event.from_tier, event.to_tier, event.id
                         );
                     }
@@ -3064,8 +3169,15 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
                     } else {
                         println!("Autonomy Audit History ({}):", events.len());
                         for ev in &events {
+                            let verif_tag = match (&ev.verified_signer, ev.action_type) {
+                                (Some(vs), _) => format!(" [verified_signer: {vs}]"),
+                                (None, crate::autonomy::AutonomyActionType::Promote) => {
+                                    " [unverified]".to_string()
+                                }
+                                _ => String::new(),
+                            };
                             println!(
-                                "  [{}] event_id: {} actor: `{}` capability: `{}` action: {} ({} -> {}) by: {}",
+                                "  [{}] event_id: {} actor: `{}` capability: `{}` action: {} ({} -> {}) by: {}{}",
                                 ev.created_at,
                                 ev.id,
                                 ev.actor,
@@ -3073,7 +3185,8 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
                                 ev.action_type,
                                 ev.from_tier,
                                 ev.to_tier,
-                                ev.authorized_by
+                                ev.authorized_by,
+                                verif_tag
                             );
                             println!("      reason: {}", ev.reason);
                         }
@@ -3090,6 +3203,7 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
             let mut actor: Option<String> = None;
             let mut capability: Option<String> = None;
             let mut required_tier_str: Option<String> = None;
+            let mut require_verified = false;
             let mut json_output = false;
 
             let mut it = sub_args.iter();
@@ -3118,6 +3232,7 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
                             return ExitCode::FAILURE;
                         }
                     },
+                    "--require-verified" => require_verified = true,
                     "--json" => json_output = true,
                     unknown => {
                         eprintln!("cicatrix autonomy check: unknown option `{unknown}`");
@@ -3157,7 +3272,12 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
                 }
             };
 
-            match store.check_autonomy(&actor, &capability, required_tier) {
+            match store.check_autonomy_verified(
+                &actor,
+                &capability,
+                required_tier,
+                require_verified,
+            ) {
                 Ok(res) => {
                     if json_output {
                         match serde_json::to_string_pretty(&res) {
@@ -3168,9 +3288,13 @@ fn cmd_autonomy(rest: &[String]) -> ExitCode {
                             }
                         }
                     } else if res.permitted {
+                        let verif_note = match &res.verified_signer {
+                            Some(vs) => format!("verified_signer: `{vs}`"),
+                            None => "verified_promotion: false".to_string(),
+                        };
                         println!(
-                            "GRANTED: actor `{}` has sufficient tier `{}` for capability `{}` (required: `{}`)",
-                            actor, res.current_tier, capability, res.required_tier
+                            "GRANTED: actor `{}` has sufficient tier `{}` for capability `{}` (required: `{}`, {})",
+                            actor, res.current_tier, capability, res.required_tier, verif_note
                         );
                     } else {
                         eprintln!(

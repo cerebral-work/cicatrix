@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS autonomy_ledger (
     reason TEXT NOT NULL,
     evidence_json TEXT,
     authorized_by TEXT NOT NULL DEFAULT 'operator',
+    verified_signer TEXT,
+    signer_fingerprint TEXT,
+    signature TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     CHECK (length(trim(id)) > 0),
     CHECK (length(trim(actor)) > 0),
@@ -22,6 +25,10 @@ CREATE TABLE IF NOT EXISTS autonomy_ledger (
     CHECK (action_type IN ('promote', 'demote', 'initialize')),
     CHECK (length(trim(reason)) > 0),
     CHECK (length(trim(authorized_by)) > 0),
+    CHECK (verified_signer IS NULL OR length(trim(verified_signer)) > 0),
+    CHECK (signer_fingerprint IS NULL OR length(trim(signer_fingerprint)) > 0),
+    CHECK (signature IS NULL OR length(trim(signature)) > 0),
+    CHECK ((verified_signer IS NULL AND signature IS NULL) OR (verified_signer IS NOT NULL AND signature IS NOT NULL)),
     -- Soma invariant: Soma production gates strictly require human verdicts; cannot be autonomous
     CHECK (NOT (lower(capability) LIKE 'soma%' AND to_tier = 'autonomous'))
 );

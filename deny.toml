@@ -39,3 +39,7 @@ wildcards = "allow"
 [sources]
 unknown-registry = "warn"
 unknown-git = "deny"
+allow-git = [
+    # EST-1500: autumn-harvest v0.10.0 on rusqlite 0.41 (RUSTSEC-2026-0459).
+    "https://github.com/cerebral-work/autumn-harvest",
+]

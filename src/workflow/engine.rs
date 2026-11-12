@@ -253,14 +253,14 @@ impl WorkflowEngine {
         self.runtime.register_workflow(&review_gate_workflow_info());
 
         self.runtime
-            .register_activity(&ingest_test_failure_info(), |val| {
+            .register_activity_with_body(&ingest_test_failure_info(), |val| {
                 let input: TriageInput = serde_json::from_value(val).map_err(|e| e.to_string())?;
                 let output = run_ingest_test_failure(input)?;
                 serde_json::to_value(output).map_err(|e| e.to_string())
             });
 
         self.runtime
-            .register_activity(&bisect_commits_info(), |val| {
+            .register_activity_with_body(&bisect_commits_info(), |val| {
                 let input: BisectCommitsInput =
                     serde_json::from_value(val).map_err(|e| e.to_string())?;
                 let output = run_bisect_commits(input)?;
@@ -268,7 +268,7 @@ impl WorkflowEngine {
             });
 
         self.runtime
-            .register_activity(&isolate_minimal_reproducer_info(), |val| {
+            .register_activity_with_body(&isolate_minimal_reproducer_info(), |val| {
                 let input: ReproducerInput =
                     serde_json::from_value(val).map_err(|e| e.to_string())?;
                 let output = run_isolate_minimal_reproducer(input)?;
@@ -276,7 +276,7 @@ impl WorkflowEngine {
             });
 
         self.runtime
-            .register_activity(&scan_repo_markers_info(), |val| {
+            .register_activity_with_body(&scan_repo_markers_info(), |val| {
                 let input: crate::workflow::audit::ScanTargetInput =
                     serde_json::from_value(val).map_err(|e| e.to_string())?;
                 let output = run_scan_repo_markers(input)?;
@@ -284,7 +284,7 @@ impl WorkflowEngine {
             });
 
         self.runtime
-            .register_activity(&aggregate_drift_report_info(), |val| {
+            .register_activity_with_body(&aggregate_drift_report_info(), |val| {
                 let input: crate::workflow::audit::AggregateInput =
                     serde_json::from_value(val).map_err(|e| e.to_string())?;
                 let output = run_aggregate_drift_report(input)?;
@@ -462,6 +462,7 @@ impl WorkflowEngine {
             }
             RunState::InProgress => "IN_PROGRESS".to_string(),
             RunState::WaitingTimer => "WAITING_TIMER".to_string(),
+            other => format!("{other:?}"),
         };
 
         Ok(SignalDeliveryReport {

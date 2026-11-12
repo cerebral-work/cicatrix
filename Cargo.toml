@@ -24,14 +24,21 @@ path = "src/main.rs"
 ureq = { version = "2", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-autumn-harvest = { version = "0.7.0", default-features = false }
-autumn-harvest-macros = "0.7.0"
-autumn-harvest-sqlite = "0.7.0"
-rusqlite = { version = "0.40", features = ["bundled"] }
+autumn-harvest = { version = "0.10.0", default-features = false }
+autumn-harvest-macros = "0.10.0"
+autumn-harvest-sqlite = "0.10.0"
+rusqlite = { version = "0.41", features = ["bundled"] }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net", "io-util"] }
 tempfile = "3"
 sha2 = "0.11"
 
 [dev-dependencies]
+
+# EST-1500: autumn-harvest v0.10.0 on rusqlite 0.41 (bundled SQLite >= 3.54.1, RUSTSEC-2026-0459),
+# from the public cerebral-work fork branch estate/v0.10-rusqlite-0.41.
+[patch.crates-io]
+autumn-harvest = { git = "https://github.com/cerebral-work/autumn-harvest", rev = "b3a4b771ef2fb43dd8558b6acaaa0354d7853528" }
+autumn-harvest-macros = { git = "https://github.com/cerebral-work/autumn-harvest", rev = "b3a4b771ef2fb43dd8558b6acaaa0354d7853528" }
+autumn-harvest-sqlite = { git = "https://github.com/cerebral-work/autumn-harvest", rev = "b3a4b771ef2fb43dd8558b6acaaa0354d7853528" }
 
 
